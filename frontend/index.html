@@ -54,6 +54,10 @@
     .metric-label { font-size: 11px; color: var(--text3); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.03em; }
     .metric-value { font-size: 21px; font-weight: 500; }
     .metric-sub { font-size: 11px; color: var(--text3); margin-top: 3px; }
+    .custom-select { position: relative; display: inline-block; }
+    .custom-select select { appearance: none; -webkit-appearance: none; padding: 6px 36px 6px 12px; font-size: 13px; border: 0.5px solid var(--border2); border-radius: var(--radius); background: var(--bg); color: var(--text); cursor: pointer; min-width: 150px; }
+    .custom-select::after { content: "\25BE"; position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--text2); font-size: 12px; }
+
     .filter-row { display: flex; gap: 8px; margin-bottom: 1rem; flex-wrap: wrap; align-items: center; }
     .filter-row label { font-size: 12px; color: var(--text2); }
     select { font-size: 13px; padding: 6px 10px; border: 0.5px solid var(--border2); border-radius: var(--radius); background: var(--bg); color: var(--text); cursor: pointer; }
@@ -184,15 +188,15 @@
     <div class="filter-row" style="display:flex;gap:12px;align-items:center;margin-bottom:1rem;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:8px;">
         <label style="font-size:12px;color:var(--text2);white-space:nowrap;">Platform</label>
-        <select id="dash-platform" onchange="renderDashboard()" style="min-width:160px;padding-right:28px;"><option value="all">All platforms</option></select>
+        <div class="custom-select"><select id="dash-platform" onchange="renderDashboard()"><option value="all">All platforms</option></select></div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <label style="font-size:12px;color:var(--text2);white-space:nowrap;">View</label>
-        <select id="dash-view" onchange="renderDashboard()" style="min-width:150px;padding-right:28px;">
+        <div class="custom-select"><select id="dash-view" onchange="renderDashboard()">
           <option value="total">Total value</option>
           <option value="platform">By platform</option>
           <option value="stock">By stock</option>
-        </select>
+        </select></div>
       </div>
     </div>
     <div class="card">
@@ -734,7 +738,7 @@ if (sessionStorage.getItem('inv_auth')) init();
 // -- Positions Table ---------------------------------------
 let posGrouping = 'none';
 let posSortCol = 'value';
-let posSortDir = -1; // -1 = desc, 1 = asc
+let posSortDir = 1; // 1 = desc (b-a), -1 = asc (a-b)
 
 function setGrouping(g, btn) {
   posGrouping = g;
@@ -748,7 +752,7 @@ function sortPositions(col) {
     posSortDir *= -1;
   } else {
     posSortCol = col;
-    posSortDir = -1;
+    posSortDir = 1;
   }
   renderPositionsTable();
 }
