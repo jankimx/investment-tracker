@@ -206,22 +206,22 @@
         <canvas id="growthChart"></canvas>
       </div>
     </div>
-  </div>
 
-  <!-- POSITIONS TABLE -->
-  <div id="positions-section" style="margin-top:0">
-    <div class="card" style="overflow-x:auto">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
-        <div class="card-title" style="margin-bottom:0">Positions</div>
-        <div class="toggle-row" style="margin-bottom:0">
-          <button class="toggle-btn active" onclick="setGrouping('none',this)">All</button>
-          <button class="toggle-btn" onclick="setGrouping('platform',this)">By platform</button>
-          <button class="toggle-btn" onclick="setGrouping('stock',this)">By stock</button>
+    <div style="margin-top:1rem;">
+      <div class="card" style="overflow-x:auto">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+          <div class="card-title" style="margin-bottom:0">Positions</div>
+          <div class="toggle-row" style="margin-bottom:0">
+            <button class="toggle-btn active" onclick="setGrouping('none',this)">All</button>
+            <button class="toggle-btn" onclick="setGrouping('platform',this)">By platform</button>
+            <button class="toggle-btn" onclick="setGrouping('stock',this)">By stock</button>
+          </div>
         </div>
+        <div id="positions-table-container"><div class="empty">No position data yet.</div></div>
       </div>
-      <div id="positions-table-container"><div class="empty">No position data yet.</div></div>
     </div>
   </div>
+
 
   <!-- HOLDINGS -->
   <div id="tab-holdings" class="section">
