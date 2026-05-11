@@ -167,6 +167,7 @@
       <div>
         <strong>Prices auto-refresh weekdays at 4pm ET</strong>
         <p id="refresh-info">Or manually refresh now.</p>
+        <p id="refresh-status" style="font-size:12px;margin-top:4px;"></p>
       </div>
       <button class="btn btn-green" id="refresh-btn" onclick="refreshPrices()">Refresh now</button>
     </div>
@@ -309,7 +310,7 @@
 function doLogin() {
   const pw = document.getElementById('login-input').value;
   const err = document.getElementById('login-error');
-  const base = localStorage.getItem('inv_api') || 'https://web-production-780915.up.railway.app';
+  const base = localStorage.getItem('inv_api') || 'http://localhost:8080';
   fetch(base + '/auth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -390,7 +391,29 @@ async function loadAll() {
     renderDashboard();
     renderRecent();
     renderHoldings();
+    fetchRefreshStatus();
   } catch(e) { console.error('loadAll failed', e); }
+}
+
+async function fetchRefreshStatus() {
+  try {
+    const status = await apiFetch('/refresh-status');
+    const el = document.getElementById('refresh-status');
+    const btn = document.getElementById('refresh-btn');
+    if (!el) return;
+    if (status.refreshed_today) {
+      // Format timestamp to local time
+      const dt = new Date(status.last_refresh + 'Z');
+      const timeStr = dt.toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit', hour12: true});
+      el.innerHTML = '<span style="color:var(--green)">✓ Already refreshed today at ' + timeStr + ' — API limit likely reached for today.</span>';
+      btn.textContent = 'Already refreshed today';
+      btn.style.opacity = '0.6';
+    } else {
+      el.innerHTML = '<span style="color:var(--text3)">Not yet refreshed today.</span>';
+      btn.textContent = 'Refresh now';
+      btn.style.opacity = '1';
+    }
+  } catch(e) { console.error('fetchRefreshStatus failed', e); }
 }
 
 function updateRefreshInfo() {
@@ -435,7 +458,8 @@ async function refreshPrices() {
     showToast(msg, 4000);
     await loadAll();
   } catch(e) { showToast('Refresh failed', 4000); }
-  btn.disabled = false; btn.textContent = 'Refresh now';
+  btn.disabled = false;
+  fetchRefreshStatus();
 }
 
 // Live preview of transaction
@@ -469,7 +493,7 @@ async function saveTransaction() {
   const date = document.getElementById('h-date').value;
   if (!platform || !stock || !shares || !price) { showToast('Fill in all fields', 3000); return; }
   const btn = document.getElementById('holding-btn');
-  btn.disabled = true; btn.textContent = 'Saving…';
+  btn.disabled = true; btn.textContent = 'Saving...';
   try {
     await apiFetch('/transactions', { method: 'POST', body: JSON.stringify({
       platform, stock, action, shares: Number(shares),
@@ -575,7 +599,7 @@ function renderGrowthChart(data, view) {
 async function submitEntry() {
   const date=document.getElementById('e-date').value,platform=document.getElementById('e-platform').value.trim(),stock=document.getElementById('e-stock').value.trim(),value=document.getElementById('e-value').value,invested=document.getElementById('e-invested').value,notes=document.getElementById('e-notes').value.trim();
   if(!date||!platform||!stock||!value){showToast('Fill in date, platform, stock, and value',3000);return;}
-  const btn=document.getElementById('save-btn'); btn.disabled=true; btn.textContent='Saving…';
+  const btn=document.getElementById('save-btn'); btn.disabled=true; btn.textContent='Saving...';
   try {
     await apiFetch('/entries',{method:'POST',body:JSON.stringify({date,platform,stock,value:Number(value),invested:invested?Number(invested):0,notes})});
     document.getElementById('e-value').value=''; document.getElementById('e-invested').value=''; document.getElementById('e-notes').value='';
