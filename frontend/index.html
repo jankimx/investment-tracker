@@ -42,13 +42,6 @@
     .logout-btn { font-size: 12px; color: var(--text3); background: none; border: none; cursor: pointer; padding: 4px 8px; }
     .logout-btn:hover { color: var(--text); }
 
-    .api-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 1.5rem; padding: 10px 14px; background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--radius); flex-wrap: wrap; }
-    .api-bar input { flex: 1; min-width: 200px; font-size: 13px; padding: 5px 8px; border: 0.5px solid var(--border2); border-radius: var(--radius); background: var(--bg); color: var(--text); }
-    .api-bar label { font-size: 12px; color: var(--text2); white-space: nowrap; }
-    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #ccc; flex-shrink: 0; }
-    .status-dot.ok { background: var(--green); }
-    .status-dot.err { background: var(--red); }
-
     .tabs { display: flex; gap: 2px; margin-bottom: 1.5rem; background: var(--bg2); border-radius: var(--radius); padding: 3px; border: 0.5px solid var(--border); width: fit-content; flex-wrap: wrap; }
     .tab { padding: 7px 16px; font-size: 13px; border: none; background: none; color: var(--text2); border-radius: 6px; cursor: pointer; }
     .tab.active { background: var(--bg); color: var(--text); font-weight: 500; box-shadow: 0 0.5px 2px rgba(0,0,0,0.1); }
@@ -145,15 +138,7 @@
     </div>
     <button class="logout-btn" onclick="logout()">Log out</button>
   </header>
-
-  <div class="api-bar">
-    <span class="status-dot" id="status-dot"></span>
-    <label>API URL:</label>
-    <input type="text" id="api-url" value="https://web-production-780915.up.railway.app" />
-    <button class="btn btn-sm" onclick="testConnection()">Connect</button>
-  </div>
-
-  <div class="tabs">
+<div class="tabs">
     <button class="tab active" onclick="switchTab('dashboard')">Dashboard</button>
     <button class="tab" onclick="switchTab('holdings')">Holdings</button>
     <button class="tab" onclick="switchTab('log')">Log entry</button>
@@ -357,25 +342,20 @@ function showToast(msg, dur=2500) {
   setTimeout(() => t.classList.remove('show'), dur);
 }
 
+const API_BASE = 'https://web-production-780915.up.railway.app';
+
 async function apiFetch(path, opts={}) {
-  const base = document.getElementById('api-url').value.replace(/\/$/, '');
-  const res = await fetch(base + path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const res = await fetch(API_BASE + path, { headers: { 'Content-Type': 'application/json' }, ...opts });
   if (!res.ok) throw new Error('HTTP ' + res.status);
   return res.json();
 }
 
 async function testConnection() {
-  const base = document.getElementById('api-url').value.replace(/\/$/, '');
-  localStorage.setItem('inv_api', base);
-  const dot = document.getElementById('status-dot');
   try {
     await apiFetch('/health');
-    dot.className = 'status-dot ok';
-    showToast('Connected');
     await loadAll();
   } catch(e) {
-    dot.className = 'status-dot err';
-    showToast('Cannot reach API', 4000);
+    showToast('Cannot reach API — check connection', 4000);
   }
 }
 
@@ -709,8 +689,6 @@ function renderProjections() {
 function init() {
   document.getElementById('e-date').value = today();
   if(document.getElementById('h-date')) document.getElementById('h-date').value = today();
-  const savedApi = localStorage.getItem('inv_api');
-  if (savedApi) document.getElementById('api-url').value = savedApi;
   testConnection();
   renderProjections();
 }
