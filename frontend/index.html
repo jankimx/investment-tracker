@@ -1005,16 +1005,6 @@ function renderPositionsTable() {
     const aggRows = aggregateRows('stock', rows);
     tbody = '<tbody>' + buildAggregateRows(aggRows, 'stock') + '</tbody>';
   }
-  } else {
-    const groups = {};
-    rows.forEach(function(r) { if (!groups[r.stock]) groups[r.stock] = []; groups[r.stock].push(r); });
-    tbody = '<tbody>';
-    Object.keys(groups).sort().forEach(function(g) {
-      const groupTotal = groups[g].reduce(function(s,r) { return s + r.value; }, 0);
-      tbody += '<tr class="group-header"><td colspan="10">' + g + ' &nbsp;&nbsp; ' + fmt(groupTotal) + ' &nbsp; (' + (groupTotal/totalValue*100).toFixed(1) + '% of portfolio)</td></tr>';
-      tbody += buildRows(groups[g]);
-    });
-    tbody += '</tbody>';
   }
 
   container.innerHTML = '<table class="positions-table">' + thead + tbody + '</table>';
