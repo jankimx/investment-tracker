@@ -638,7 +638,6 @@ function renderDashboard() {
   const filtered = pfSel.value==='all'?entries:entries.filter(e=>e.platform===pfSel.value);
   renderGrowthChart(filtered, document.getElementById('dash-view').value);
 
-  ).join('');
 }
 
 function renderGrowthChart(data, view) {
