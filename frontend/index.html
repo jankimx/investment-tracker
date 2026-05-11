@@ -309,7 +309,7 @@
 function doLogin() {
   const pw = document.getElementById('login-input').value;
   const err = document.getElementById('login-error');
-  const base = localStorage.getItem('inv_api') || 'http://localhost:8080';
+  const base = localStorage.getItem('inv_api') || 'https://web-production-780915.up.railway.app';
   fetch(base + '/auth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
