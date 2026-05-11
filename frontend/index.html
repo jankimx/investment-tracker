@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Investment Tracker</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #ffffff; --bg2: #f5f5f3; --bg3: #eeede8;
+      --text: #1a1a18; --text2: #6b6b67; --text3: #9b9b97;
+      --border: rgba(0,0,0,0.1); --border2: rgba(0,0,0,0.18);
+      --radius: 8px; --radius-lg: 12px;
+      --green: #0F6E56; --red: #a32d2d; --blue: #185FA5;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1c1a; --bg2: #252523; --bg3: #2e2e2b;
+        --text: #f0efea; --text2: #a0a09a; --text3: #6b6b65;
+        --border: rgba(255,255,255,0.1); --border2: rgba(255,255,255,0.18);
+        --green: #1D9E75; --red: #E24B4A; --blue: #378ADD;
+      }
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg3); color: var(--text); min-height: 100vh; }
+
+    /* ── Login Screen ── */
+    .login-screen { display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 2rem; }
+    .login-box { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--radius-lg); padding: 2.5rem; width: 100%; max-width: 360px; text-align: center; }
+    .login-box h1 { font-size: 20px; font-weight: 500; margin-bottom: 6px; }
+    .login-box p { font-size: 13px; color: var(--text2); margin-bottom: 1.5rem; }
+    .login-box input { width: 100%; font-size: 15px; padding: 10px 14px; border: 0.5px solid var(--border2); border-radius: var(--radius); background: var(--bg); color: var(--text); margin-bottom: 10px; text-align: center; letter-spacing: 2px; }
+    .login-box input:focus { outline: none; box-shadow: 0 0 0 2px rgba(24,95,165,0.3); }
+    .login-error { font-size: 13px; color: var(--red); margin-top: 8px; min-height: 20px; }
+
+    /* ── App ── */
+    .app { max-width: 920px; margin: 0 auto; padding: 1.5rem 1rem 4rem; display: none; }
+    .app.visible { display: block; }
+    header { margin-bottom: 1.5rem; display: flex; align-items: center; justify-content: space-between; }
+    header h1 { font-size: 22px; font-weight: 500; }
+    header p { font-size: 13px; color: var(--text2); margin-top: 2px; }
+    .logout-btn { font-size: 12px; color: var(--text3); background: none; border: none; cursor: pointer; padding: 4px 8px; }
+    .logout-btn:hover { color: var(--text); }
+
+    .api-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 1.5rem; padding: 10px 14px; background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--radius); flex-wrap: wrap; }
+    .api-bar input { flex: 1; min-width: 200px; font-size: 13px; padding: 5px 8px; border: 0.5px solid var(--border2); border-radius: var(--radius); background: var(--bg); color: var(--text); }
+    .api-bar label { font-size: 12px; color: var(--text2); white-space: nowrap; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #ccc; flex-shrink: 0; }
+    .status-dot.ok { background: var(--green); }
+    .status-dot.err { background: var(--red); }
+
+    .tabs { display: flex; gap: 2px; margin-bottom: 1.5rem; background: var(--bg2); border-radius: var(--radius); padding: 3px; border: 0.5px solid var(--border); width: fit-content; flex-wrap: wrap; }
+    .tab { padding: 7px 16px; font-size: 13px; border: none; background: none; color: var(--text2); border-radius: 6px; cursor: pointer; }
+    .tab.active { background: var(--bg); color: var(--text); font-weight: 500; box-shadow: 0 0.5px 2px rgba(0,0,0,0.1); }
+    .section { display: none; }
+    .section.active { display: block; }
+    .card { background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--radius-lg); padding: 1.1rem 1.25rem; margin-bottom: 1rem; }
+    .card-title { font-size: 13px; font-weight: 500; color: var(--text2); margin-bottom: 12px; }
+    .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 1rem; }
+    .metric { background: var(--bg2); border-radius: var(--radius); padding: 12px 14px; }
+    .metric-label { font-size: 11px; color: var(--text3); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.03em; }
+    .metric-value { font-size: 21px; font-weight: 500; }
+    .metric-sub { font-size: 11px; color: var(--text3); margin-top: 3px; }
+    .filter-row { display: flex; gap: 8px; margin-bottom: 1rem; flex-wrap: wrap; align-items: center; }
+    .filter-row label { font-size: 12px; color: var(--text2); }
+    select { font-size: 13px; padding: 6px 10px; border: 0.5px solid var(--border2); border-radius: var(--radius); background: var(--bg); color: var(--text); cursor: pointer; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    .form-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    .form-grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+    .form-group { display: flex; flex-direction: column; gap: 4px; }
+    .form-group label { font-size: 12px; color: var(--text2); }
+    input[type=text], input[type=number], input[type=date] {
+      font-size: 14px; padding: 7px 10px; border: 0.5px solid var(--border2); border-radius: var(--radius);
+      background: var(--bg); color: var(--text); width: 100%;
+    }
+    input:focus, select:focus { outline: none; box-shadow: 0 0 0 2px rgba(24,95,165,0.3); }
+    .btn { padding: 8px 18px; font-size: 13px; border: 0.5px solid var(--border2); border-radius: var(--radius); cursor: pointer; background: var(--bg); color: var(--text); }
+    .btn:hover { background: var(--bg2); }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+    .btn-primary:hover { opacity: 0.85; background: var(--text); }
+    .btn-green { background: var(--green); color: #fff; border-color: var(--green); font-weight: 500; }
+    .btn-green:hover { opacity: 0.88; background: var(--green); }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .btn-danger { color: var(--red); border-color: var(--red); background: transparent; }
+    .btn-danger:hover { background: rgba(163,45,45,0.07); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; font-size: 11px; font-weight: 500; color: var(--text3); padding: 6px 8px; border-bottom: 0.5px solid var(--border); text-transform: uppercase; letter-spacing: 0.04em; }
+    td { padding: 9px 8px; border-bottom: 0.5px solid var(--border); color: var(--text); vertical-align: middle; }
+    tr:last-child td { border-bottom: none; }
+    .td-right { text-align: right; }
+    .badge { display: inline-block; padding: 2px 9px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+    .badge-0 { background: #E6F1FB; color: #0C447C; }
+    .badge-1 { background: #E1F5EE; color: #085041; }
+    .badge-2 { background: #FAEEDA; color: #633806; }
+    .badge-3 { background: #EEEDFE; color: #3C3489; }
+    .badge-4 { background: #FAECE7; color: #712B13; }
+    .badge-5 { background: #EAF3DE; color: #27500A; }
+    .positive { color: var(--green); }
+    .negative { color: var(--red); }
+    .legend { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 10px; font-size: 12px; color: var(--text2); }
+    .legend-item { display: flex; align-items: center; gap: 5px; }
+    .legend-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+    .slider-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .slider-row label { font-size: 13px; color: var(--text2); width: 160px; flex-shrink: 0; }
+    .slider-row input[type=range] { flex: 1; accent-color: var(--blue); }
+    .slider-val { font-size: 13px; font-weight: 500; width: 60px; text-align: right; }
+    .proj-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
+    .empty { text-align: center; padding: 2.5rem; color: var(--text3); font-size: 13px; }
+    .toast { position: fixed; bottom: 24px; right: 24px; padding: 10px 18px; background: var(--text); color: var(--bg); border-radius: var(--radius); font-size: 13px; opacity: 0; transition: opacity 0.2s; pointer-events: none; z-index: 999; max-width: 320px; }
+    .toast.show { opacity: 1; }
+    .refresh-box { background: var(--bg2); border: 0.5px solid var(--border); border-radius: var(--radius-lg); padding: 1.1rem 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
+    .refresh-box p { font-size: 13px; color: var(--text2); }
+    .refresh-box strong { color: var(--text); font-weight: 500; }
+    .hint { font-size: 12px; color: var(--text3); margin-top: 6px; }
+    .schedule-badge { font-size: 11px; background: #E1F5EE; color: #085041; padding: 3px 8px; border-radius: 4px; font-weight: 500; }
+    @media (max-width: 600px) {
+      .form-grid { grid-template-columns: 1fr 1fr; }
+      .form-grid-4 { grid-template-columns: 1fr 1fr; }
+      .metric-grid { grid-template-columns: 1fr 1fr; }
+      .proj-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- LOGIN SCREEN -->
+<div class="login-screen" id="login-screen">
+  <div class="login-box">
+    <h1>Investment Tracker</h1>
+    <p>Enter password to continue</p>
+    <input type="password" id="login-input" placeholder="••••••••••••" onkeydown="if(event.key==='Enter')doLogin()" autofocus />
+    <button class="btn btn-primary" style="width:100%" onclick="doLogin()">Enter</button>
+    <div class="login-error" id="login-error"></div>
+  </div>
+</div>
+
+<!-- MAIN APP -->
+<div class="app" id="main-app">
+  <header>
+    <div>
+      <h1>Investment Tracker</h1>
+      <p>Auto-refreshes weekdays at 4pm ET · <span class="schedule-badge">Scheduled</span></p>
+    </div>
+    <button class="logout-btn" onclick="logout()">Log out</button>
+  </header>
+
+  <div class="api-bar">
+    <span class="status-dot" id="status-dot"></span>
+    <label>API URL:</label>
+    <input type="text" id="api-url" value="http://localhost:8080" />
+    <button class="btn btn-sm" onclick="testConnection()">Connect</button>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" onclick="switchTab('dashboard')">Dashboard</button>
+    <button class="tab" onclick="switchTab('holdings')">Holdings</button>
+    <button class="tab" onclick="switchTab('log')">Log entry</button>
+    <button class="tab" onclick="switchTab('history')">History</button>
+    <button class="tab" onclick="switchTab('projections')">Projections</button>
+  </div>
+
+  <!-- DASHBOARD -->
+  <div id="tab-dashboard" class="section active">
+    <div class="refresh-box">
+      <div>
+        <strong>Prices auto-refresh weekdays at 4pm ET</strong>
+        <p>Or manually refresh now — uses 1 of your 25 daily API calls.</p>
+      </div>
+      <button class="btn btn-green" id="refresh-btn" onclick="refreshPrices()">Refresh now</button>
+    </div>
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-label">Total value</div><div class="metric-value" id="m-total">—</div></div>
+      <div class="metric"><div class="metric-label">Total invested</div><div class="metric-value" id="m-invested">—</div></div>
+      <div class="metric"><div class="metric-label">Gain / loss</div><div class="metric-value" id="m-gain">—</div><div class="metric-sub" id="m-gainpct"></div></div>
+      <div class="metric"><div class="metric-label">Entries logged</div><div class="metric-value" id="m-count">—</div></div>
+    </div>
+    <div class="filter-row">
+      <label>Platform:</label>
+      <select id="dash-platform" onchange="renderDashboard()"><option value="all">All platforms</option></select>
+      <label style="margin-left:8px;">View:</label>
+      <select id="dash-view" onchange="renderDashboard()">
+        <option value="total">Total value</option>
+        <option value="platform">By platform</option>
+        <option value="stock">By stock</option>
+      </select>
+    </div>
+    <div class="card">
+      <div class="card-title">Portfolio value over time</div>
+      <div class="legend" id="chart-legend"></div>
+      <div style="position:relative;width:100%;height:270px;">
+        <canvas id="growthChart"></canvas>
+      </div>
+    </div>
+    <div id="platform-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;"></div>
+  </div>
+
+  <!-- HOLDINGS -->
+  <div id="tab-holdings" class="section">
+    <div class="card">
+      <div class="card-title">Add or update a holding</div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:14px;">Enter your shares here. Prices are fetched automatically every weekday at 4pm ET.</p>
+      <div class="form-grid-4">
+        <div class="form-group"><label>Platform</label><input type="text" id="h-platform" placeholder="Fidelity" list="h-dl-platform" autocomplete="off" /><datalist id="h-dl-platform"></datalist></div>
+        <div class="form-group"><label>Ticker symbol</label><input type="text" id="h-stock" placeholder="AAPL" autocomplete="off" style="text-transform:uppercase" /></div>
+        <div class="form-group"><label>Number of shares</label><input type="number" id="h-shares" placeholder="10.5" min="0" step="0.0001" /></div>
+        <div class="form-group"><label>Avg cost/share ($) <span style="color:var(--text3);font-size:11px;">optional</span></label><input type="number" id="h-cost" placeholder="150.00" min="0" step="0.01" /></div>
+      </div>
+      <button class="btn btn-primary" onclick="saveHolding()" id="holding-btn">Save holding</button>
+      <p class="hint">Tip: update shares here whenever you buy or sell.</p>
+    </div>
+    <div class="card">
+      <div class="card-title">Your holdings</div>
+      <div id="holdings-list"><div class="empty">No holdings yet.</div></div>
+    </div>
+  </div>
+
+  <!-- LOG ENTRY -->
+  <div id="tab-log" class="section">
+    <div class="card">
+      <div class="card-title">Add a manual entry</div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:14px;">For accounts that can't be auto-priced (401k, savings, etc).</p>
+      <div class="form-grid">
+        <div class="form-group"><label>Date</label><input type="date" id="e-date" /></div>
+        <div class="form-group"><label>Platform</label><input type="text" id="e-platform" placeholder="Fidelity…" list="dl-platform" autocomplete="off" /><datalist id="dl-platform"></datalist></div>
+        <div class="form-group"><label>Stock / Asset</label><input type="text" id="e-stock" placeholder="AAPL, 401k…" list="dl-stock" autocomplete="off" /><datalist id="dl-stock"></datalist></div>
+      </div>
+      <div class="form-grid-2">
+        <div class="form-group"><label>Current value ($)</label><input type="number" id="e-value" placeholder="0.00" min="0" step="0.01" /></div>
+        <div class="form-group"><label>Amount invested ($) <span style="color:var(--text3);font-size:11px;">optional</span></label><input type="number" id="e-invested" placeholder="0.00" min="0" step="0.01" /></div>
+      </div>
+      <div class="form-group" style="margin-bottom:14px;"><label>Notes <span style="color:var(--text3);font-size:11px;">optional</span></label><input type="text" id="e-notes" placeholder="Any notes…" /></div>
+      <button class="btn btn-primary" onclick="submitEntry()" id="save-btn">Save entry</button>
+    </div>
+    <div class="card"><div class="card-title">Recent entries</div><div id="recent-list"><div class="empty">No entries yet.</div></div></div>
+  </div>
+
+  <!-- HISTORY -->
+  <div id="tab-history" class="section">
+    <div class="filter-row">
+      <label>Platform:</label><select id="h-platform-f" onchange="renderHistory()"><option value="all">All</option></select>
+      <label style="margin-left:8px;">Stock:</label><select id="h-stock-f" onchange="renderHistory()"><option value="all">All</option></select>
+      <button class="btn btn-sm" onclick="exportCSV()" style="margin-left:auto;">Export CSV</button>
+    </div>
+    <div class="card" style="overflow-x:auto;">
+      <table>
+        <thead><tr><th>Date</th><th>Platform</th><th>Stock</th><th class="td-right">Shares</th><th class="td-right">Price</th><th class="td-right">Value</th><th class="td-right">Invested</th><th class="td-right">Gain/Loss</th><th></th></tr></thead>
+        <tbody id="history-body"><tr><td colspan="9" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- PROJECTIONS -->
+  <div id="tab-projections" class="section">
+    <div class="card">
+      <div class="card-title">Projection inputs</div>
+      <div class="proj-grid">
+        <div class="form-group"><label style="font-size:12px;color:var(--text2);">Starting value ($)</label><input type="number" id="p-start" value="10000" min="0" oninput="renderProjections()" /></div>
+        <div class="form-group"><label style="font-size:12px;color:var(--text2);">Monthly contribution ($)</label><input type="number" id="p-monthly" value="500" min="0" oninput="renderProjections()" /></div>
+      </div>
+      <div class="slider-row"><label>Annual return</label><input type="range" min="1" max="30" step="0.5" value="8" id="p-rate" oninput="document.getElementById('p-rate-v').textContent=this.value+'%';renderProjections()" /><span class="slider-val" id="p-rate-v">8%</span></div>
+      <div class="slider-row"><label>Time horizon</label><input type="range" min="1" max="40" step="1" value="10" id="p-years" oninput="document.getElementById('p-years-v').textContent=this.value+'y';renderProjections()" /><span class="slider-val" id="p-years-v">10y</span></div>
+      <div class="slider-row"><label>Pessimistic rate</label><input type="range" min="0" max="20" step="0.5" value="4" id="p-low" oninput="document.getElementById('p-low-v').textContent=this.value+'%';renderProjections()" /><span class="slider-val" id="p-low-v">4%</span></div>
+      <div class="slider-row"><label>Optimistic rate</label><input type="range" min="2" max="40" step="0.5" value="12" id="p-high" oninput="document.getElementById('p-high-v').textContent=this.value+'%';renderProjections()" /><span class="slider-val" id="p-high-v">12%</span></div>
+      <button class="btn btn-sm" onclick="useCurrentTotal()">Use my current portfolio total</button>
+    </div>
+    <div class="card">
+      <div class="card-title">Projected growth</div>
+      <div class="legend">
+        <span class="legend-item"><span class="legend-swatch" style="background:#3266ad"></span>Base</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:#639922"></span>Optimistic</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:#E24B4A"></span>Pessimistic</span>
+        <span class="legend-item"><span class="legend-swatch" style="background:#888"></span>Contributed</span>
+      </div>
+      <div style="position:relative;width:100%;height:270px;"><canvas id="projChart"></canvas></div>
+    </div>
+    <div class="card" style="overflow-x:auto;">
+      <div class="card-title">Year-by-year breakdown</div>
+      <table>
+        <thead><tr><th>Year</th><th class="td-right">Pessimistic</th><th class="td-right">Base case</th><th class="td-right">Optimistic</th><th class="td-right">Total contributed</th></tr></thead>
+        <tbody id="proj-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ── Auth ──────────────────────────────────────────────────
+function doLogin() {
+  const pw = document.getElementById('login-input').value;
+  const err = document.getElementById('login-error');
+  const base = localStorage.getItem('inv_api') || 'http://localhost:8080';
+  fetch(base + '/auth', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: pw })
+  }).then(r => r.json()).then(data => {
+    if (data.ok) {
+      sessionStorage.setItem('inv_auth', '1');
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('main-app').classList.add('visible');
+      init();
+    } else {
+      err.textContent = 'Wrong password. Try again.';
+      document.getElementById('login-input').value = '';
+    }
+  }).catch(() => {
+    err.textContent = 'Cannot reach server. Check API URL.';
+  });
+}
+
+function logout() {
+  sessionStorage.removeItem('inv_auth');
+  location.reload();
+}
+
+// Check if already logged in this session
+if (sessionStorage.getItem('inv_auth')) {
+  document.getElementById('login-screen').style.display = 'none';
+  document.getElementById('main-app').classList.add('visible');
+}
+
+// ── State ─────────────────────────────────────────────────
+let entries = [], platforms = [], stocks = [], summary = null, holdings = [];
+let growthChart = null, projChart = null;
+
+function today() { return new Date().toISOString().split('T')[0]; }
+function fmt(v) { return '$' + Math.round(v).toLocaleString(); }
+function fmtDec(v) { return '$' + Number(v).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}); }
+function badgeClass(s) { let h=0; for(let c of s) h=(h*31+c.charCodeAt(0))%6; return 'badge-'+h; }
+const COLORS = ['#3266ad','#0F6E56','#BA7517','#993556','#534AB7','#993C1D','#3B6D11'];
+function colorFor(s) { let h=0; for(let c of s) h=(h*31+c.charCodeAt(0))%COLORS.length; return COLORS[h]; }
+
+function showToast(msg, dur=2500) {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), dur);
+}
+
+async function apiFetch(path, opts={}) {
+  const base = document.getElementById('api-url').value.replace(/\/$/, '');
+  const res = await fetch(base + path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  return res.json();
+}
+
+async function testConnection() {
+  const base = document.getElementById('api-url').value.replace(/\/$/, '');
+  localStorage.setItem('inv_api', base);
+  const dot = document.getElementById('status-dot');
+  try {
+    await apiFetch('/health');
+    dot.className = 'status-dot ok';
+    showToast('Connected');
+    await loadAll();
+  } catch(e) {
+    dot.className = 'status-dot err';
+    showToast('Cannot reach API', 4000);
+  }
+}
+
+async function loadAll() {
+  try {
+    [entries, platforms, stocks, summary, holdings] = await Promise.all([
+      apiFetch('/entries'), apiFetch('/platforms'), apiFetch('/stocks'),
+      apiFetch('/summary'), apiFetch('/holdings')
+    ]);
+    updateDataLists();
+    renderDashboard();
+    renderRecent();
+    renderHoldings();
+  } catch(e) { console.error('loadAll failed', e); }
+}
+
+function updateDataLists() {
+  document.getElementById('dl-platform').innerHTML = platforms.map(p => '<option value="'+p+'">').join('');
+  document.getElementById('dl-stock').innerHTML = stocks.map(s => '<option value="'+s+'">').join('');
+  document.getElementById('h-dl-platform').innerHTML = platforms.map(p => '<option value="'+p+'">').join('');
+}
+
+function switchTab(tab) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  const order = ['dashboard','holdings','log','history','projections'];
+  document.querySelectorAll('.tab')[order.indexOf(tab)].classList.add('active');
+  document.getElementById('tab-'+tab).classList.add('active');
+  if(tab==='dashboard') renderDashboard();
+  if(tab==='history') renderHistory();
+  if(tab==='projections') renderProjections();
+  if(tab==='log') renderRecent();
+  if(tab==='holdings') renderHoldings();
+}
+
+async function refreshPrices() {
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true; btn.textContent = 'Fetching prices…';
+  try {
+    const res = await apiFetch('/refresh-prices', { method: 'POST' });
+    if (res.error) { showToast(res.error, 5000); return; }
+    let msg = 'Updated ' + res.refreshed + ' holding' + (res.refreshed!==1?'s':'') + ' for ' + res.date;
+    if (res.errors && res.errors.length > 0) msg += ' — ' + res.errors.length + ' failed';
+    showToast(msg, 4000);
+    await loadAll();
+  } catch(e) { showToast('Refresh failed', 4000); }
+  btn.disabled = false; btn.textContent = 'Refresh now';
+}
+
+async function saveHolding() {
+  const platform = document.getElementById('h-platform').value.trim();
+  const stock = document.getElementById('h-stock').value.trim().toUpperCase();
+  const shares = document.getElementById('h-shares').value;
+  const cost = document.getElementById('h-cost').value;
+  if (!platform || !stock || !shares) { showToast('Fill in platform, ticker, and shares', 3000); return; }
+  const btn = document.getElementById('holding-btn');
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await apiFetch('/holdings', { method: 'POST', body: JSON.stringify({ platform, stock, shares: Number(shares), cost_basis: cost ? Number(cost) : 0 }) });
+    document.getElementById('h-shares').value = '';
+    document.getElementById('h-cost').value = '';
+    showToast('Saved ' + shares + ' shares of ' + stock);
+    await loadAll();
+  } catch(e) { showToast('Failed to save', 3000); }
+  btn.disabled = false; btn.textContent = 'Save holding';
+}
+
+function renderHoldings() {
+  const el = document.getElementById('holdings-list');
+  if (!holdings.length) { el.innerHTML = '<div class="empty">No holdings yet.</div>'; return; }
+  el.innerHTML = '<table><thead><tr><th>Platform</th><th>Ticker</th><th class="td-right">Shares</th><th class="td-right">Avg cost/share</th><th class="td-right">Cost basis</th><th></th></tr></thead><tbody>' +
+    holdings.map(h => '<tr><td><span class="badge '+badgeClass(h.platform)+'">'+h.platform+'</span></td><td style="font-weight:500">'+h.stock+'</td><td class="td-right">'+Number(h.shares).toLocaleString('en-US',{maximumFractionDigits:4})+'</td><td class="td-right">'+(h.cost_basis?fmtDec(h.cost_basis):'—')+'</td><td class="td-right">'+(h.cost_basis?fmtDec(h.cost_basis*h.shares):'—')+'</td><td><button class="btn btn-sm btn-danger" onclick="deleteHolding(\''+h.id+'\')">Delete</button></td></tr>').join('') +
+    '</tbody></table>';
+}
+
+async function deleteHolding(id) {
+  if (!confirm('Delete this holding?')) return;
+  try { await apiFetch('/holdings/'+id, {method:'DELETE'}); showToast('Deleted'); await loadAll(); }
+  catch(e) { showToast('Delete failed', 3000); }
+}
+
+function renderDashboard() {
+  if (!summary) return;
+  document.getElementById('m-total').textContent = fmt(summary.total_value);
+  document.getElementById('m-invested').textContent = fmt(summary.total_invested);
+  const gain = summary.total_gain;
+  const gainEl = document.getElementById('m-gain');
+  gainEl.textContent = (gain>=0?'+':'')+fmt(gain);
+  gainEl.className = 'metric-value '+(gain>=0?'positive':'negative');
+  document.getElementById('m-gainpct').textContent = summary.total_invested>0?((gain/summary.total_invested)*100).toFixed(1)+'%':'';
+  document.getElementById('m-count').textContent = summary.entry_count;
+
+  const pfSel = document.getElementById('dash-platform');
+  const curPF = pfSel.value;
+  pfSel.innerHTML = '<option value="all">All platforms</option>'+platforms.map(p=>'<option value="'+p+'"'+(p===curPF?' selected':'')+'>'+p+'</option>').join('');
+
+  const filtered = pfSel.value==='all'?entries:entries.filter(e=>e.platform===pfSel.value);
+  renderGrowthChart(filtered, document.getElementById('dash-view').value);
+
+  document.getElementById('platform-cards').innerHTML = Object.entries(summary.platforms).map(([p,v])=>
+    '<div class="metric" style="cursor:pointer" onclick="document.getElementById(\'dash-platform\').value=\''+p+'\';renderDashboard()"><div class="metric-label">'+p+'</div><div class="metric-value">'+fmt(v)+'</div><div class="metric-sub">'+((v/summary.total_value)*100).toFixed(1)+'% of total</div></div>'
+  ).join('');
+}
+
+function renderGrowthChart(data, view) {
+  const allDates = [...new Set(data.map(e=>e.date))].sort();
+  if (!allDates.length) { if(growthChart){growthChart.destroy();growthChart=null;} document.getElementById('chart-legend').innerHTML=''; return; }
+  const latestAt = (subset,d) => { const combos={}; for(const e of subset.filter(e=>e.date<=d)){const k=e.platform+'||'+e.stock; if(!combos[k]||e.date>combos[k].date)combos[k]=e;} return Object.values(combos).reduce((s,e)=>s+e.value,0); };
+  let datasets=[];
+  if(view==='total'){
+    datasets=[{label:'Total',data:allDates.map(d=>Math.round(latestAt(data,d))),borderColor:'#3266ad',backgroundColor:'rgba(50,102,173,0.07)',fill:true,tension:0.35,pointRadius:3}];
+    document.getElementById('chart-legend').innerHTML='<span class="legend-item"><span class="legend-swatch" style="background:#3266ad"></span>Total value</span>';
+  } else {
+    const keys=view==='platform'?[...new Set(data.map(e=>e.platform))]:[...new Set(data.map(e=>e.stock))];
+    datasets=keys.map(k=>{const color=colorFor(k);const subset=data.filter(e=>(view==='platform'?e.platform:e.stock)===k);return{label:k,data:allDates.map(d=>Math.round(latestAt(subset,d))),borderColor:color,fill:false,tension:0.35,pointRadius:3};});
+    document.getElementById('chart-legend').innerHTML=datasets.map(d=>'<span class="legend-item"><span class="legend-swatch" style="background:'+d.borderColor+'"></span>'+d.label+'</span>').join('');
+  }
+  if(growthChart)growthChart.destroy();
+  growthChart=new Chart(document.getElementById('growthChart'),{type:'line',data:{labels:allDates,datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmt(c.parsed.y)}}},scales:{x:{ticks:{maxTicksLimit:8,font:{size:11},color:'#888'},grid:{display:false}},y:{ticks:{callback:v=>fmt(v),font:{size:11},color:'#888',maxTicksLimit:6},grid:{color:'rgba(128,128,128,0.1)'}}}}});
+}
+
+async function submitEntry() {
+  const date=document.getElementById('e-date').value,platform=document.getElementById('e-platform').value.trim(),stock=document.getElementById('e-stock').value.trim(),value=document.getElementById('e-value').value,invested=document.getElementById('e-invested').value,notes=document.getElementById('e-notes').value.trim();
+  if(!date||!platform||!stock||!value){showToast('Fill in date, platform, stock, and value',3000);return;}
+  const btn=document.getElementById('save-btn'); btn.disabled=true; btn.textContent='Saving…';
+  try {
+    await apiFetch('/entries',{method:'POST',body:JSON.stringify({date,platform,stock,value:Number(value),invested:invested?Number(invested):0,notes})});
+    document.getElementById('e-value').value=''; document.getElementById('e-invested').value=''; document.getElementById('e-notes').value='';
+    showToast('Entry saved'); await loadAll();
+  } catch(e){showToast('Failed to save',4000);}
+  btn.disabled=false; btn.textContent='Save entry';
+}
+
+function renderRecent() {
+  const recent=[...entries].sort((a,b)=>a.date<b.date?1:-1).slice(0,8);
+  const el=document.getElementById('recent-list');
+  if(!recent.length){el.innerHTML='<div class="empty">No entries yet.</div>';return;}
+  el.innerHTML='<table><thead><tr><th>Date</th><th>Platform</th><th>Stock</th><th class="td-right">Value</th><th>Source</th><th></th></tr></thead><tbody>'+
+    recent.map(e=>'<tr><td>'+e.date+'</td><td><span class="badge '+badgeClass(e.platform)+'">'+e.platform+'</span></td><td>'+e.stock+'</td><td class="td-right">'+fmtDec(e.value)+'</td><td style="font-size:11px;color:var(--text3)">'+(e.auto_logged?'auto':'manual')+'</td><td><button class="btn btn-sm btn-danger" onclick="deleteEntry(\''+e.id+'\')">Del</button></td></tr>').join('')+
+    '</tbody></table>';
+}
+
+async function deleteEntry(id) {
+  if(!confirm('Delete?'))return;
+  try{await apiFetch('/entries/'+id,{method:'DELETE'});showToast('Deleted');await loadAll();}
+  catch(e){showToast('Delete failed',3000);}
+}
+
+function renderHistory() {
+  const hpf=document.getElementById('h-platform-f'),hst=document.getElementById('h-stock-f');
+  const curPF=hpf.value,curST=hst.value;
+  hpf.innerHTML='<option value="all">All</option>'+platforms.map(p=>'<option value="'+p+'"'+(p===curPF?' selected':'')+'>'+p+'</option>').join('');
+  hst.innerHTML='<option value="all">All</option>'+stocks.map(s=>'<option value="'+s+'"'+(s===curST?' selected':'')+'>'+s+'</option>').join('');
+  let filtered=[...entries].sort((a,b)=>a.date<b.date?1:-1);
+  if(hpf.value!=='all')filtered=filtered.filter(e=>e.platform===hpf.value);
+  if(hst.value!=='all')filtered=filtered.filter(e=>e.stock===hst.value);
+  const body=document.getElementById('history-body');
+  if(!filtered.length){body.innerHTML='<tr><td colspan="9" class="empty">No entries match.</td></tr>';return;}
+  body.innerHTML=filtered.map(e=>{const gain=e.invested?e.value-e.invested:null;const gainStr=gain!==null?'<span class="'+(gain>=0?'positive':'negative')+'">'+(gain>=0?'+':'')+fmtDec(gain)+'</span>':'—';return'<tr><td>'+e.date+'</td><td><span class="badge '+badgeClass(e.platform)+'">'+e.platform+'</span></td><td>'+e.stock+'</td><td class="td-right">'+(e.shares?Number(e.shares).toFixed(4):'—')+'</td><td class="td-right">'+(e.price?fmtDec(e.price):'—')+'</td><td class="td-right">'+fmtDec(e.value)+'</td><td class="td-right">'+(e.invested?fmtDec(e.invested):'—')+'</td><td class="td-right">'+gainStr+'</td><td><button class="btn btn-sm btn-danger" onclick="deleteEntry(\''+e.id+'\');setTimeout(renderHistory,400)">Del</button></td></tr>';}).join('');
+}
+
+function exportCSV() {
+  const rows=[['Date','Platform','Stock','Shares','Price','Value','Invested','Gain/Loss','Auto']];
+  entries.forEach(e=>{const gain=e.invested?(e.value-e.invested).toFixed(2):'';rows.push([e.date,e.platform,e.stock,e.shares||'',e.price||'',e.value,e.invested||'',gain,e.auto_logged?'yes':'no']);});
+  const csv=rows.map(r=>r.map(v=>'"'+v+'"').join(',')).join('\n');
+  const a=document.createElement('a');a.href='data:text/csv,'+encodeURIComponent(csv);a.download='investments.csv';a.click();
+}
+
+function compound(principal,monthly,rate,years) {
+  const r=rate/100/12; let v=principal; const out=[{year:0,value:principal,contributed:principal}];
+  for(let m=1;m<=years*12;m++){v=v*(1+r)+monthly;if(m%12===0)out.push({year:m/12,value:v,contributed:principal+monthly*m});}
+  return out;
+}
+
+function useCurrentTotal() { if(summary){document.getElementById('p-start').value=Math.round(summary.total_value);renderProjections();} }
+
+function renderProjections() {
+  const start=Number(document.getElementById('p-start').value)||0,monthly=Number(document.getElementById('p-monthly').value)||0,rate=Number(document.getElementById('p-rate').value),years=Number(document.getElementById('p-years').value),low=Number(document.getElementById('p-low').value),high=Number(document.getElementById('p-high').value);
+  const base=compound(start,monthly,rate,years),pess=compound(start,monthly,low,years),opt=compound(start,monthly,high,years);
+  const labels=base.map(d=>d.year===0?'Now':'Year '+d.year);
+  if(projChart)projChart.destroy();
+  projChart=new Chart(document.getElementById('projChart'),{type:'line',data:{labels,datasets:[{label:'Base',data:base.map(d=>Math.round(d.value)),borderColor:'#3266ad',backgroundColor:'rgba(50,102,173,0.05)',fill:true,tension:0.4,pointRadius:2},{label:'Optimistic',data:opt.map(d=>Math.round(d.value)),borderColor:'#639922',fill:false,tension:0.4,pointRadius:2,borderDash:[5,3]},{label:'Pessimistic',data:pess.map(d=>Math.round(d.value)),borderColor:'#E24B4A',fill:false,tension:0.4,pointRadius:2,borderDash:[3,3]},{label:'Contributed',data:base.map(d=>Math.round(d.contributed)),borderColor:'#888',fill:false,tension:0,pointRadius:0,borderDash:[2,4]}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmt(c.parsed.y)}}},scales:{x:{ticks:{font:{size:11},color:'#888',maxTicksLimit:10},grid:{display:false}},y:{ticks:{callback:v=>fmt(v),font:{size:11},color:'#888',maxTicksLimit:6},grid:{color:'rgba(128,128,128,0.1)'}}}}});
+  document.getElementById('proj-body').innerHTML=base.map((d,i)=>'<tr><td>'+(d.year===0?'Now':'Year '+d.year)+'</td><td class="td-right" style="color:var(--red)">'+fmt(pess[i].value)+'</td><td class="td-right" style="font-weight:500">'+fmt(d.value)+'</td><td class="td-right" style="color:var(--green)">'+fmt(opt[i].value)+'</td><td class="td-right" style="color:var(--text3)">'+fmt(d.contributed)+'</td></tr>').join('');
+}
+
+function init() {
+  document.getElementById('e-date').value = today();
+  const savedApi = localStorage.getItem('inv_api');
+  if (savedApi) document.getElementById('api-url').value = savedApi;
+  testConnection();
+  renderProjections();
+}
+
+// Auto-init if already logged in
+if (sessionStorage.getItem('inv_auth')) init();
+</script>
+</body>
+</html>
