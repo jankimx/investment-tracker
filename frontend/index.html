@@ -845,7 +845,7 @@ function renderPositionsTable() {
       theadHtml += '<th>' + c.label + '</th>';
     } else {
       const isSorted = posSortCol === c.key;
-      const arrowChar = isSorted ? (posSortDir === -1 ? ' v' : ' ^') : ' -';
+      const arrowChar = isSorted ? (posSortDir === -1 ? ' &#9660;' : ' &#9650;') : '';
       const cls = isSorted ? 'sorted' : '';
       theadHtml += '<th class="' + cls + '" data-col="' + c.key + '">' + c.label + arrowChar + '</th>';
     }
