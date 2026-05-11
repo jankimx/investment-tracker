@@ -18,15 +18,6 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-@app.before_request
-def setup_indexes():
-    global _indexes_created
-    if not _indexes_created:
-        ensure_indexes()
-        _indexes_created = True
-
-_indexes_created = False
-
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 DB_NAME = os.getenv("DB_NAME", "investment_tracker")
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
@@ -36,14 +27,28 @@ client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
 entries_col = db["entries"]
 holdings_col = db["holdings"]
+transactions_col = db["transactions"]
+
+_indexes_created = False
 
 def ensure_indexes():
     try:
         entries_col.create_index([("date", DESCENDING)])
         entries_col.create_index([("platform", 1)])
         entries_col.create_index([("stock", 1)])
+        transactions_col.create_index([("platform", 1), ("stock", 1)])
+        transactions_col.create_index([("date", DESCENDING)])
     except Exception as e:
         print("Index creation warning:", e)
+
+app2 = Flask(__name__)
+
+@app.before_request
+def setup_indexes():
+    global _indexes_created
+    if not _indexes_created:
+        ensure_indexes()
+        _indexes_created = True
 
 
 def serialize(doc):
@@ -72,7 +77,6 @@ def fetch_price(symbol):
 
 
 def do_refresh_prices():
-    """Core price refresh logic — used by both the API endpoint and the scheduler."""
     holdings = list(holdings_col.find())
     if not holdings:
         return {"refreshed": 0, "results": [], "errors": [], "date": datetime.utcnow().strftime("%Y-%m-%d")}
@@ -94,7 +98,6 @@ def do_refresh_prices():
     for batch_num, batch in enumerate(batches):
         if batch_num > 0:
             time.sleep(BATCH_WAIT)
-
         with ThreadPoolExecutor(max_workers=BATCH_SIZE) as executor:
             futures = {executor.submit(process_holding, h): h for h in batch}
             for future in as_completed(futures):
@@ -102,51 +105,33 @@ def do_refresh_prices():
                 if price is None:
                     errors.append({"stock": symbol, "platform": h["platform"], "error": error})
                     continue
-
                 shares = h["shares"]
                 value = round(price * shares, 2)
                 invested = round(h.get("cost_basis", 0) * shares, 2)
-
                 entries_col.update_one(
                     {"date": today, "platform": h["platform"], "stock": h["stock"]},
                     {"$set": {
-                        "date": today,
-                        "platform": h["platform"],
-                        "stock": h["stock"],
-                        "value": value,
-                        "invested": invested,
-                        "shares": shares,
-                        "price": price,
-                        "auto_logged": True,
+                        "date": today, "platform": h["platform"], "stock": h["stock"],
+                        "value": value, "invested": invested, "shares": shares,
+                        "price": price, "auto_logged": True,
                         "updated_at": datetime.utcnow().isoformat()
                     }},
                     upsert=True
                 )
-                results.append({
-                    "stock": symbol,
-                    "platform": h["platform"],
-                    "shares": shares,
-                    "price": price,
-                    "value": value
-                })
+                results.append({"stock": symbol, "platform": h["platform"], "shares": shares, "price": price, "value": value})
 
     return {"refreshed": len(results), "results": results, "errors": errors, "date": today}
 
 
 def scheduled_refresh():
-    """Called automatically by the scheduler."""
     print("[Scheduler] Auto-refreshing prices at " + datetime.utcnow().isoformat())
     result = do_refresh_prices()
-    print("[Scheduler] Done — refreshed " + str(result["refreshed"]) + " holdings, " + str(len(result["errors"])) + " errors")
+    print("[Scheduler] Done — refreshed " + str(result["refreshed"]) + " holdings")
 
 
-# ── Scheduler — runs at 4pm ET (21:00 UTC) daily on weekdays ──
 scheduler = BackgroundScheduler()
 et = pytz.timezone("America/New_York")
-scheduler.add_job(
-    scheduled_refresh,
-    CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone=et)
-)
+scheduler.add_job(scheduled_refresh, CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone=et))
 scheduler.start()
 
 
@@ -160,6 +145,74 @@ def auth():
     return jsonify({"ok": False, "error": "Wrong password"}), 401
 
 
+# ── Transactions ──────────────────────────────────────────
+
+@app.route("/transactions", methods=["GET"])
+def get_transactions():
+    platform = request.args.get("platform")
+    stock = request.args.get("stock")
+    query = {}
+    if platform: query["platform"] = platform
+    if stock: query["stock"] = stock
+    txns = [serialize(t) for t in transactions_col.find(query).sort("date", DESCENDING)]
+    return jsonify(txns)
+
+
+@app.route("/transactions", methods=["POST"])
+def add_transaction():
+    data = request.json
+    for field in ["platform", "stock", "action", "shares", "price_per_share"]:
+        if field not in data:
+            return jsonify({"error": "Missing field: " + field}), 400
+
+    platform = data["platform"]
+    stock = data["stock"].upper()
+    action = data["action"]  # "buy" or "sell"
+    shares = float(data["shares"])
+    price_per_share = float(data["price_per_share"])
+    date = data.get("date", datetime.utcnow().strftime("%Y-%m-%d"))
+
+    # Save transaction
+    txn = {
+        "platform": platform, "stock": stock, "action": action,
+        "shares": shares, "price_per_share": price_per_share,
+        "date": date, "created_at": datetime.utcnow().isoformat()
+    }
+    transactions_col.insert_one(txn)
+
+    # Update holding
+    existing = holdings_col.find_one({"platform": platform, "stock": stock})
+    if existing:
+        old_shares = existing.get("shares", 0)
+        old_cost = existing.get("cost_basis", 0)
+        if action == "buy":
+            new_shares = old_shares + shares
+            # Weighted average cost
+            new_cost = ((old_shares * old_cost) + (shares * price_per_share)) / new_shares if new_shares > 0 else price_per_share
+        else:  # sell
+            new_shares = max(0, old_shares - shares)
+            new_cost = old_cost  # cost basis doesn't change on sell
+        holdings_col.update_one(
+            {"platform": platform, "stock": stock},
+            {"$set": {"shares": round(new_shares, 6), "cost_basis": round(new_cost, 4), "updated_at": datetime.utcnow().isoformat()}}
+        )
+    else:
+        # New holding — create it
+        holdings_col.insert_one({
+            "platform": platform, "stock": stock,
+            "shares": shares, "cost_basis": price_per_share,
+            "updated_at": datetime.utcnow().isoformat()
+        })
+
+    return jsonify({"message": "Transaction saved"}), 201
+
+
+@app.route("/transactions/<txn_id>", methods=["DELETE"])
+def delete_transaction(txn_id):
+    transactions_col.delete_one({"_id": ObjectId(txn_id)})
+    return jsonify({"deleted": txn_id})
+
+
 # ── Holdings ──────────────────────────────────────────────
 
 @app.route("/holdings", methods=["GET"])
@@ -170,6 +223,7 @@ def get_holdings():
 
 @app.route("/holdings", methods=["POST"])
 def upsert_holding():
+    """Legacy endpoint — still works for direct edits."""
     data = request.json
     for field in ["platform", "stock", "shares"]:
         if field not in data:
@@ -179,8 +233,7 @@ def upsert_holding():
     data["updated_at"] = datetime.utcnow().isoformat()
     holdings_col.update_one(
         {"platform": data["platform"], "stock": data["stock"]},
-        {"$set": data},
-        upsert=True
+        {"$set": data}, upsert=True
     )
     return jsonify({"message": "Holding saved"}), 201
 
@@ -193,8 +246,7 @@ def delete_holding(holding_id):
 
 @app.route("/refresh-prices", methods=["POST"])
 def refresh_prices():
-    result = do_refresh_prices()
-    return jsonify(result)
+    return jsonify(do_refresh_prices())
 
 
 # ── Entries ───────────────────────────────────────────────
@@ -202,10 +254,8 @@ def refresh_prices():
 @app.route("/entries", methods=["GET"])
 def get_entries():
     query = {}
-    if request.args.get("platform"):
-        query["platform"] = request.args.get("platform")
-    if request.args.get("stock"):
-        query["stock"] = request.args.get("stock")
+    if request.args.get("platform"): query["platform"] = request.args.get("platform")
+    if request.args.get("stock"): query["stock"] = request.args.get("stock")
     result = [serialize(e) for e in entries_col.find(query).sort("date", DESCENDING)]
     return jsonify(result)
 
@@ -226,10 +276,8 @@ def add_entry():
 @app.route("/entries/<entry_id>", methods=["PUT"])
 def update_entry(entry_id):
     data = request.json
-    if "value" in data:
-        data["value"] = float(data["value"])
-    if "invested" in data:
-        data["invested"] = float(data["invested"])
+    if "value" in data: data["value"] = float(data["value"])
+    if "invested" in data: data["invested"] = float(data["invested"])
     data["updated_at"] = datetime.utcnow().isoformat()
     entries_col.update_one({"_id": ObjectId(entry_id)}, {"$set": data})
     return jsonify({"message": "Updated"})
@@ -255,20 +303,38 @@ def get_summary():
     total_value = sum(e["value"] for e in latest.values())
     total_invested = sum(e.get("invested", 0) for e in latest.values())
 
-    platforms = {}
-    for e in latest.values():
-        pf = e["platform"]
-        platforms[pf] = platforms.get(pf, 0) + e["value"]
+    # Daily gain/loss — compare latest date vs previous date
+    all_dates = sorted(set(e["date"] for e in all_entries), reverse=True)
+    daily_gain = None
+    daily_gain_pct = None
+    if len(all_dates) >= 2:
+        today_date = all_dates[0]
+        prev_date = all_dates[1]
+        today_entries = {}
+        prev_entries = {}
+        for e in all_entries:
+            k = e["platform"] + "||" + e["stock"]
+            if e["date"] == today_date and k not in today_entries:
+                today_entries[k] = e
+            if e["date"] == prev_date and k not in prev_entries:
+                prev_entries[k] = e
+        today_total = sum(e["value"] for e in today_entries.values())
+        prev_total = sum(e["value"] for e in prev_entries.values())
+        daily_gain = round(today_total - prev_total, 2)
+        daily_gain_pct = round((daily_gain / prev_total * 100), 2) if prev_total > 0 else 0
 
+    platforms = {}
     stocks = {}
     for e in latest.values():
-        st = e["stock"]
-        stocks[st] = stocks.get(st, 0) + e["value"]
+        platforms[e["platform"]] = platforms.get(e["platform"], 0) + e["value"]
+        stocks[e["stock"]] = stocks.get(e["stock"], 0) + e["value"]
 
     return jsonify({
         "total_value": round(total_value, 2),
         "total_invested": round(total_invested, 2),
         "total_gain": round(total_value - total_invested, 2),
+        "daily_gain": daily_gain,
+        "daily_gain_pct": daily_gain_pct,
         "platforms": platforms,
         "stocks": stocks,
         "entry_count": len(all_entries)
@@ -288,11 +354,9 @@ def get_stocks():
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
-        "status": "ok",
-        "db": DB_NAME,
+        "status": "ok", "db": DB_NAME,
         "alpha_vantage": "configured" if ALPHA_VANTAGE_KEY else "missing",
-        "scheduler": "running",
-        "next_refresh": "weekdays at 4:00pm ET"
+        "scheduler": "running", "next_refresh": "weekdays at 4:00pm ET"
     })
 
 

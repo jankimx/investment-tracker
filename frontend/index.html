@@ -173,7 +173,8 @@
     <div class="metric-grid">
       <div class="metric"><div class="metric-label">Total value</div><div class="metric-value" id="m-total">—</div></div>
       <div class="metric"><div class="metric-label">Total invested</div><div class="metric-value" id="m-invested">—</div></div>
-      <div class="metric"><div class="metric-label">Gain / loss</div><div class="metric-value" id="m-gain">—</div><div class="metric-sub" id="m-gainpct"></div></div>
+      <div class="metric"><div class="metric-label">Total gain / loss</div><div class="metric-value" id="m-gain">—</div><div class="metric-sub" id="m-gainpct"></div></div>
+      <div class="metric"><div class="metric-label">Daily gain / loss</div><div class="metric-value" id="m-daily">—</div><div class="metric-sub" id="m-dailypct"></div></div>
       <div class="metric"><div class="metric-label">Entries logged</div><div class="metric-value" id="m-count">—</div></div>
     </div>
     <div class="filter-row">
@@ -199,20 +200,36 @@
   <!-- HOLDINGS -->
   <div id="tab-holdings" class="section">
     <div class="card">
-      <div class="card-title">Add or update a holding</div>
-      <p style="font-size:13px;color:var(--text2);margin-bottom:14px;">Enter your shares here. Prices are fetched automatically every weekday at 4pm ET.</p>
-      <div class="form-grid-4">
-        <div class="form-group"><label>Platform</label><input type="text" id="h-platform" placeholder="Fidelity" list="h-dl-platform" autocomplete="off" /><datalist id="h-dl-platform"></datalist></div>
+      <div class="card-title">Log a transaction</div>
+      <p style="font-size:13px;color:var(--text2);margin-bottom:14px;">Enter how many shares you bought or sold. The app automatically updates your total and recalculates your average cost.</p>
+      <div class="form-grid">
+        <div class="form-group"><label>Platform</label><input type="text" id="h-platform" placeholder="Jon - Fidelity" list="h-dl-platform" autocomplete="off" /><datalist id="h-dl-platform"></datalist></div>
         <div class="form-group"><label>Ticker symbol</label><input type="text" id="h-stock" placeholder="AAPL" autocomplete="off" style="text-transform:uppercase" /></div>
-        <div class="form-group"><label>Number of shares</label><input type="number" id="h-shares" placeholder="10.5" min="0" step="0.0001" /></div>
-        <div class="form-group"><label>Avg cost/share ($) <span style="color:var(--text3);font-size:11px;">optional</span></label><input type="number" id="h-cost" placeholder="150.00" min="0" step="0.01" /></div>
+        <div class="form-group"><label>Date</label><input type="date" id="h-date" /></div>
       </div>
-      <button class="btn btn-primary" onclick="saveHolding()" id="holding-btn">Save holding</button>
-      <p class="hint">Tip: update shares here whenever you buy or sell.</p>
+      <div class="form-grid">
+        <div class="form-group">
+          <label>Action</label>
+          <select id="h-action">
+            <option value="buy">Buy</option>
+            <option value="sell">Sell</option>
+          </select>
+        </div>
+        <div class="form-group"><label>Number of shares</label><input type="number" id="h-shares" placeholder="10" min="0" step="0.0001" /></div>
+        <div class="form-group"><label>Price per share ($)</label><input type="number" id="h-price" placeholder="189.00" min="0" step="0.01" /></div>
+      </div>
+      <div id="txn-preview" style="font-size:13px;color:var(--text2);margin-bottom:12px;min-height:20px;"></div>
+      <button class="btn btn-primary" onclick="saveTransaction()" id="holding-btn">Save transaction</button>
     </div>
+
     <div class="card">
-      <div class="card-title">Your holdings</div>
+      <div class="card-title">Current holdings</div>
       <div id="holdings-list"><div class="empty">No holdings yet.</div></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Transaction history</div>
+      <div id="txn-list"><div class="empty">No transactions yet.</div></div>
     </div>
   </div>
 
@@ -292,7 +309,7 @@
 function doLogin() {
   const pw = document.getElementById('login-input').value;
   const err = document.getElementById('login-error');
-  const base = localStorage.getItem('inv_api') || 'https://web-production-780915.up.railway.app';
+  const base = localStorage.getItem('inv_api') || 'http://localhost:8080';
   fetch(base + '/auth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -404,7 +421,7 @@ function switchTab(tab) {
   if(tab==='history') renderHistory();
   if(tab==='projections') renderProjections();
   if(tab==='log') renderRecent();
-  if(tab==='holdings') renderHoldings();
+  if(tab==='holdings') { renderHoldings(); renderTransactions(); }
 }
 
 async function refreshPrices() {
@@ -421,22 +438,70 @@ async function refreshPrices() {
   btn.disabled = false; btn.textContent = 'Refresh now';
 }
 
-async function saveHolding() {
+// Live preview of transaction
+function updateTxnPreview() {
+  const shares = document.getElementById('h-shares').value;
+  const price = document.getElementById('h-price').value;
+  const action = document.getElementById('h-action').value;
+  const stock = document.getElementById('h-stock').value.trim().toUpperCase();
+  const el = document.getElementById('txn-preview');
+  if (shares && price && stock) {
+    const total = (Number(shares) * Number(price)).toFixed(2);
+    el.textContent = (action === 'buy' ? 'Buying' : 'Selling') + ' ' + shares + ' shares of ' + stock + ' at $' + Number(price).toFixed(2) + ' = $' + Number(total).toLocaleString();
+  } else {
+    el.textContent = '';
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  ['h-shares','h-price','h-action','h-stock'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateTxnPreview);
+  });
+});
+
+async function saveTransaction() {
   const platform = document.getElementById('h-platform').value.trim();
   const stock = document.getElementById('h-stock').value.trim().toUpperCase();
+  const action = document.getElementById('h-action').value;
   const shares = document.getElementById('h-shares').value;
-  const cost = document.getElementById('h-cost').value;
-  if (!platform || !stock || !shares) { showToast('Fill in platform, ticker, and shares', 3000); return; }
+  const price = document.getElementById('h-price').value;
+  const date = document.getElementById('h-date').value;
+  if (!platform || !stock || !shares || !price) { showToast('Fill in all fields', 3000); return; }
   const btn = document.getElementById('holding-btn');
   btn.disabled = true; btn.textContent = 'Saving…';
   try {
-    await apiFetch('/holdings', { method: 'POST', body: JSON.stringify({ platform, stock, shares: Number(shares), cost_basis: cost ? Number(cost) : 0 }) });
+    await apiFetch('/transactions', { method: 'POST', body: JSON.stringify({
+      platform, stock, action, shares: Number(shares),
+      price_per_share: Number(price), date: date || today()
+    })});
     document.getElementById('h-shares').value = '';
-    document.getElementById('h-cost').value = '';
-    showToast('Saved ' + shares + ' shares of ' + stock);
+    document.getElementById('h-price').value = '';
+    document.getElementById('txn-preview').textContent = '';
+    showToast((action === 'buy' ? 'Bought' : 'Sold') + ' ' + shares + ' shares of ' + stock);
     await loadAll();
   } catch(e) { showToast('Failed to save', 3000); }
-  btn.disabled = false; btn.textContent = 'Save holding';
+  btn.disabled = false; btn.textContent = 'Save transaction';
+}
+
+async function renderTransactions() {
+  try {
+    const txns = await apiFetch('/transactions');
+    const el = document.getElementById('txn-list');
+    if (!txns.length) { el.innerHTML = '<div class="empty">No transactions yet.</div>'; return; }
+    el.innerHTML = '<table><thead><tr><th>Date</th><th>Platform</th><th>Ticker</th><th>Action</th><th class="td-right">Shares</th><th class="td-right">Price/share</th><th class="td-right">Total</th><th></th></tr></thead><tbody>' +
+      txns.map(t => {
+        const total = (t.shares * t.price_per_share).toFixed(2);
+        const actionColor = t.action === 'buy' ? 'var(--green)' : 'var(--red)';
+        return '<tr><td>' + t.date + '</td><td><span class="badge ' + badgeClass(t.platform) + '">' + t.platform + '</span></td><td style="font-weight:500">' + t.stock + '</td><td style="color:' + actionColor + ';font-weight:500;text-transform:capitalize">' + t.action + '</td><td class="td-right">' + Number(t.shares).toLocaleString('en-US',{maximumFractionDigits:4}) + '</td><td class="td-right">$' + Number(t.price_per_share).toFixed(2) + '</td><td class="td-right">$' + Number(total).toLocaleString() + '</td><td><button class="btn btn-sm btn-danger" onclick="deleteTransaction('' + t.id + '')">Del</button></td></tr>';
+      }).join('') + '</tbody></table>';
+  } catch(e) { console.error('renderTransactions failed', e); }
+}
+
+async function deleteTransaction(id) {
+  if (!confirm('Delete this transaction? Note: this does not reverse the holding update.')) return;
+  try { await apiFetch('/transactions/' + id, {method:'DELETE'}); showToast('Deleted'); renderTransactions(); }
+  catch(e) { showToast('Delete failed', 3000); }
 }
 
 function renderHoldings() {
@@ -463,6 +528,20 @@ function renderDashboard() {
   gainEl.className = 'metric-value '+(gain>=0?'positive':'negative');
   document.getElementById('m-gainpct').textContent = summary.total_invested>0?((gain/summary.total_invested)*100).toFixed(1)+'%':'';
   document.getElementById('m-count').textContent = summary.entry_count;
+
+  // Daily gain/loss
+  const dailyEl = document.getElementById('m-daily');
+  const dailyPctEl = document.getElementById('m-dailypct');
+  if (summary.daily_gain !== null && summary.daily_gain !== undefined) {
+    const dg = summary.daily_gain;
+    dailyEl.textContent = (dg >= 0 ? '+' : '') + fmt(dg);
+    dailyEl.className = 'metric-value ' + (dg >= 0 ? 'positive' : 'negative');
+    dailyPctEl.textContent = summary.daily_gain_pct !== null ? (dg >= 0 ? '+' : '') + summary.daily_gain_pct + '%' : '';
+  } else {
+    dailyEl.textContent = '—';
+    dailyEl.className = 'metric-value';
+    dailyPctEl.textContent = 'Not enough data yet';
+  }
 
   const pfSel = document.getElementById('dash-platform');
   const curPF = pfSel.value;
@@ -559,6 +638,7 @@ function renderProjections() {
 
 function init() {
   document.getElementById('e-date').value = today();
+  if(document.getElementById('h-date')) document.getElementById('h-date').value = today();
   const savedApi = localStorage.getItem('inv_api');
   if (savedApi) document.getElementById('api-url').value = savedApi;
   testConnection();
