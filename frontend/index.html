@@ -306,7 +306,7 @@
 <div class="toast" id="toast"></div>
 
 <script>
-// ── Auth ──────────────────────────────────────────────────
+//    Auth                                                   
 function doLogin() {
   const pw = document.getElementById('login-input').value;
   const err = document.getElementById('login-error');
@@ -341,7 +341,7 @@ if (sessionStorage.getItem('inv_auth')) {
   document.getElementById('main-app').classList.add('visible');
 }
 
-// ── State ─────────────────────────────────────────────────
+//    State                                                  
 let entries = [], platforms = [], stocks = [], summary = null, holdings = [];
 let growthChart = null, projChart = null;
 
@@ -405,7 +405,7 @@ async function fetchRefreshStatus() {
       // Format timestamp to local time
       const dt = new Date(status.last_refresh + 'Z');
       const timeStr = dt.toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit', hour12: true});
-      el.innerHTML = '<span style="color:var(--green)">✓ Already refreshed today at ' + timeStr + ' — API limit likely reached for today.</span>';
+      el.innerHTML = '<span style="color:var(--green)">  Already refreshed today at ' + timeStr + '   API limit likely reached for today.</span>';
       btn.textContent = 'Already refreshed today';
       btn.style.opacity = '0.6';
     } else {
@@ -424,7 +424,7 @@ function updateRefreshInfo() {
   if (count === 0) {
     el.textContent = 'Add holdings to enable auto-refresh.';
   } else {
-    el.textContent = 'Each refresh uses ' + count + ' of your 25 daily API calls — you can refresh ~' + remaining + 'x per day.';
+    el.textContent = 'Each refresh uses ' + count + ' of your 25 daily API calls   you can refresh ~' + remaining + 'x per day.';
   }
 }
 
@@ -449,12 +449,12 @@ function switchTab(tab) {
 
 async function refreshPrices() {
   const btn = document.getElementById('refresh-btn');
-  btn.disabled = true; btn.textContent = 'Fetching prices…';
+  btn.disabled = true; btn.textContent = 'Fetching prices ';
   try {
     const res = await apiFetch('/refresh-prices', { method: 'POST' });
     if (res.error) { showToast(res.error, 5000); return; }
     let msg = 'Updated ' + res.refreshed + ' holding' + (res.refreshed!==1?'s':'') + ' for ' + res.date;
-    if (res.errors && res.errors.length > 0) msg += ' — ' + res.errors.length + ' failed';
+    if (res.errors && res.errors.length > 0) msg += '   ' + res.errors.length + ' failed';
     showToast(msg, 4000);
     await loadAll();
   } catch(e) { showToast('Refresh failed', 4000); }
@@ -532,7 +532,7 @@ function renderHoldings() {
   const el = document.getElementById('holdings-list');
   if (!holdings.length) { el.innerHTML = '<div class="empty">No holdings yet.</div>'; return; }
   el.innerHTML = '<table><thead><tr><th>Platform</th><th>Ticker</th><th class="td-right">Shares</th><th class="td-right">Avg cost/share</th><th class="td-right">Cost basis</th><th></th></tr></thead><tbody>' +
-    holdings.map(h => '<tr><td><span class="badge '+badgeClass(h.platform)+'">'+h.platform+'</span></td><td style="font-weight:500">'+h.stock+'</td><td class="td-right">'+Number(h.shares).toLocaleString('en-US',{maximumFractionDigits:4})+'</td><td class="td-right">'+(h.cost_basis?fmtDec(h.cost_basis):'—')+'</td><td class="td-right">'+(h.cost_basis?fmtDec(h.cost_basis*h.shares):'—')+'</td><td><button class="btn btn-sm btn-danger" onclick="deleteHolding(\''+h.id+'\')">Delete</button></td></tr>').join('') +
+    holdings.map(h => '<tr><td><span class="badge '+badgeClass(h.platform)+'">'+h.platform+'</span></td><td style="font-weight:500">'+h.stock+'</td><td class="td-right">'+Number(h.shares).toLocaleString('en-US',{maximumFractionDigits:4})+'</td><td class="td-right">'+(h.cost_basis?fmtDec(h.cost_basis):' ')+'</td><td class="td-right">'+(h.cost_basis?fmtDec(h.cost_basis*h.shares):' ')+'</td><td><button class="btn btn-sm btn-danger" onclick="deleteHolding(\''+h.id+'\')">Delete</button></td></tr>').join('') +
     '</tbody></table>';
 }
 
@@ -562,7 +562,7 @@ function renderDashboard() {
     dailyEl.className = 'metric-value ' + (dg >= 0 ? 'positive' : 'negative');
     dailyPctEl.textContent = summary.daily_gain_pct !== null ? (dg >= 0 ? '+' : '') + summary.daily_gain_pct + '%' : '';
   } else {
-    dailyEl.textContent = '—';
+    dailyEl.textContent = ' ';
     dailyEl.className = 'metric-value';
     dailyPctEl.textContent = 'Not enough data yet';
   }
@@ -633,7 +633,7 @@ function renderHistory() {
   if(hst.value!=='all')filtered=filtered.filter(e=>e.stock===hst.value);
   const body=document.getElementById('history-body');
   if(!filtered.length){body.innerHTML='<tr><td colspan="9" class="empty">No entries match.</td></tr>';return;}
-  body.innerHTML=filtered.map(e=>{const gain=e.invested?e.value-e.invested:null;const gainStr=gain!==null?'<span class="'+(gain>=0?'positive':'negative')+'">'+(gain>=0?'+':'')+fmtDec(gain)+'</span>':'—';return'<tr><td>'+e.date+'</td><td><span class="badge '+badgeClass(e.platform)+'">'+e.platform+'</span></td><td>'+e.stock+'</td><td class="td-right">'+(e.shares?Number(e.shares).toFixed(4):'—')+'</td><td class="td-right">'+(e.price?fmtDec(e.price):'—')+'</td><td class="td-right">'+fmtDec(e.value)+'</td><td class="td-right">'+(e.invested?fmtDec(e.invested):'—')+'</td><td class="td-right">'+gainStr+'</td><td><button class="btn btn-sm btn-danger" onclick="deleteEntry(\''+e.id+'\');setTimeout(renderHistory,400)">Del</button></td></tr>';}).join('');
+  body.innerHTML=filtered.map(e=>{const gain=e.invested?e.value-e.invested:null;const gainStr=gain!==null?'<span class="'+(gain>=0?'positive':'negative')+'">'+(gain>=0?'+':'')+fmtDec(gain)+'</span>':' ';return'<tr><td>'+e.date+'</td><td><span class="badge '+badgeClass(e.platform)+'">'+e.platform+'</span></td><td>'+e.stock+'</td><td class="td-right">'+(e.shares?Number(e.shares).toFixed(4):' ')+'</td><td class="td-right">'+(e.price?fmtDec(e.price):' ')+'</td><td class="td-right">'+fmtDec(e.value)+'</td><td class="td-right">'+(e.invested?fmtDec(e.invested):' ')+'</td><td class="td-right">'+gainStr+'</td><td><button class="btn btn-sm btn-danger" onclick="deleteEntry(\''+e.id+'\');setTimeout(renderHistory,400)">Del</button></td></tr>';}).join('');
 }
 
 function exportCSV() {
