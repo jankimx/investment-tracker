@@ -108,6 +108,24 @@
     .refresh-box strong { color: var(--text); font-weight: 500; }
     .hint { font-size: 12px; color: var(--text3); margin-top: 6px; }
     .schedule-badge { font-size: 11px; background: #E1F5EE; color: #085041; padding: 3px 8px; border-radius: 4px; font-weight: 500; }
+    .positions-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .positions-table th { text-align: right; font-size: 11px; font-weight: 500; color: var(--text3); padding: 7px 10px; border-bottom: 0.5px solid var(--border); text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; user-select: none; white-space: nowrap; }
+    .positions-table th:first-child, .positions-table th:nth-child(2) { text-align: left; }
+    .positions-table th:hover { color: var(--text2); }
+    .positions-table th.sorted { color: var(--text); }
+    .positions-table td { text-align: right; padding: 9px 10px; border-bottom: 0.5px solid var(--border); vertical-align: middle; }
+    .positions-table td:first-child, .positions-table td:nth-child(2) { text-align: left; }
+    .positions-table tr:last-child td { border-bottom: none; }
+    .positions-table tr:hover td { background: var(--bg2); }
+    .group-header td { background: var(--bg2); font-weight: 500; font-size: 12px; color: var(--text2); padding: 6px 10px; }
+    .sort-arrow { margin-left: 4px; opacity: 0.5; font-size: 10px; }
+    .pos-gain { color: var(--green); }
+    .pos-loss { color: var(--red); }
+    .pct-bar { display: inline-block; height: 4px; background: var(--blue); border-radius: 2px; margin-left: 6px; opacity: 0.4; vertical-align: middle; }
+    .toggle-row { display: flex; gap: 6px; margin-bottom: 10px; }
+    .toggle-btn { padding: 5px 12px; font-size: 12px; border: 0.5px solid var(--border2); border-radius: var(--radius); cursor: pointer; background: var(--bg); color: var(--text2); }
+    .toggle-btn.active { background: var(--text); color: var(--bg); border-color: var(--text); }
+
     @media (max-width: 600px) {
       .form-grid { grid-template-columns: 1fr 1fr; }
       .form-grid-4 { grid-template-columns: 1fr 1fr; }
@@ -180,6 +198,21 @@
       </div>
     </div>
     <div id="platform-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;"></div>
+  </div>
+
+  <!-- POSITIONS TABLE -->
+  <div id="positions-section" style="margin-top:0">
+    <div class="card" style="overflow-x:auto">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;">
+        <div class="card-title" style="margin-bottom:0">Positions</div>
+        <div class="toggle-row" style="margin-bottom:0">
+          <button class="toggle-btn active" onclick="setGrouping('none',this)">All</button>
+          <button class="toggle-btn" onclick="setGrouping('platform',this)">By platform</button>
+          <button class="toggle-btn" onclick="setGrouping('stock',this)">By stock</button>
+        </div>
+      </div>
+      <div id="positions-table-container"><div class="empty">No position data yet.</div></div>
+    </div>
   </div>
 
   <!-- HOLDINGS -->
@@ -368,6 +401,7 @@ async function loadAll() {
     updateDataLists();
     updateRefreshInfo();
     renderDashboard();
+    renderPositionsTable();
     renderRecent();
     renderHoldings();
     fetchRefreshStatus();
@@ -695,6 +729,155 @@ function init() {
 
 // Auto-init if already logged in
 if (sessionStorage.getItem('inv_auth')) init();
+
+// ── Positions Table ───────────────────────────────────────
+let posGrouping = 'none';
+let posSortCol = 'value';
+let posSortDir = -1; // -1 = desc, 1 = asc
+
+function setGrouping(g, btn) {
+  posGrouping = g;
+  document.querySelectorAll('.toggle-btn').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  renderPositionsTable();
+}
+
+function sortPositions(col) {
+  if (posSortCol === col) {
+    posSortDir *= -1;
+  } else {
+    posSortCol = col;
+    posSortDir = -1;
+  }
+  renderPositionsTable();
+}
+
+function renderPositionsTable() {
+  if (!entries.length || !summary) return;
+  const container = document.getElementById('positions-table-container');
+  if (!container) return;
+
+  // Build latest snapshot per platform+stock
+  const latest = {};
+  const prevLatest = {};
+  const allDates = [...new Set(entries.map(function(e) { return e.date; }))].sort().reverse();
+  const todayDate = allDates[0];
+  const prevDate = allDates[1];
+
+  entries.forEach(function(e) {
+    const k = e.platform + '||' + e.stock;
+    if (e.date === todayDate && !latest[k]) latest[k] = e;
+    if (prevDate && e.date === prevDate && !prevLatest[k]) prevLatest[k] = e;
+  });
+
+  const totalValue = summary.total_value || 1;
+
+  // Build rows
+  let rows = Object.values(latest).map(function(e) {
+    const prev = prevLatest[e.platform + '||' + e.stock];
+    const dailyGain = prev ? e.value - prev.value : null;
+    const dailyGainPct = (prev && prev.value > 0) ? ((e.value - prev.value) / prev.value * 100) : null;
+    const totalGain = e.invested ? e.value - e.invested : null;
+    const totalGainPct = (e.invested && e.invested > 0) ? ((e.value - e.invested) / e.invested * 100) : null;
+    const pctOfPortfolio = (e.value / totalValue * 100);
+    return {
+      platform: e.platform,
+      stock: e.stock,
+      value: e.value,
+      invested: e.invested || 0,
+      shares: e.shares || null,
+      price: e.price || null,
+      costBasis: e.cost_basis || (e.invested && e.shares ? e.invested / e.shares : null),
+      totalGain: totalGain,
+      totalGainPct: totalGainPct,
+      dailyGain: dailyGain,
+      dailyGainPct: dailyGainPct,
+      pctOfPortfolio: pctOfPortfolio
+    };
+  });
+
+  // Sort
+  const sortFns = {
+    'value': function(a,b) { return (b.value - a.value) * posSortDir; },
+    'totalGain': function(a,b) { return ((b.totalGain||0) - (a.totalGain||0)) * posSortDir; },
+    'totalGainPct': function(a,b) { return ((b.totalGainPct||0) - (a.totalGainPct||0)) * posSortDir; },
+    'dailyGain': function(a,b) { return ((b.dailyGain||0) - (a.dailyGain||0)) * posSortDir; },
+    'dailyGainPct': function(a,b) { return ((b.dailyGainPct||0) - (a.dailyGainPct||0)) * posSortDir; },
+    'pctOfPortfolio': function(a,b) { return (b.pctOfPortfolio - a.pctOfPortfolio) * posSortDir; },
+    'stock': function(a,b) { return a.stock.localeCompare(b.stock) * posSortDir; },
+    'platform': function(a,b) { return a.platform.localeCompare(b.platform) * posSortDir; }
+  };
+  rows.sort(sortFns[posSortCol] || sortFns['value']);
+
+  function arrow(col) {
+    if (posSortCol !== col) return '<span class="sort-arrow">↕</span>';
+    return '<span class="sort-arrow">' + (posSortDir === -1 ? '↓' : '↑') + '</span>';
+  }
+
+  function gainCell(val, pct) {
+    if (val === null) return '<td>—</td><td>—</td>';
+    const cls = val >= 0 ? 'pos-gain' : 'pos-loss';
+    const sign = val >= 0 ? '+' : '';
+    const pctStr = pct !== null ? sign + pct.toFixed(1) + '%' : '';
+    return '<td class="' + cls + '">' + sign + fmt(val) + '</td><td class="' + cls + '">' + pctStr + '</td>';
+  }
+
+  const thead = '<thead><tr>' +
+    '<th onclick="sortPositions('platform')" class="' + (posSortCol==='platform'?'sorted':'') + '">Platform' + arrow('platform') + '</th>' +
+    '<th onclick="sortPositions('stock')" class="' + (posSortCol==='stock'?'sorted':'') + '">Stock' + arrow('stock') + '</th>' +
+    '<th onclick="sortPositions('value')" class="' + (posSortCol==='value'?'sorted':'') + '">Value' + arrow('value') + '</th>' +
+    '<th>Cost basis</th>' +
+    '<th onclick="sortPositions('totalGain')" class="' + (posSortCol==='totalGain'?'sorted':'') + '">Total gain' + arrow('totalGain') + '</th>' +
+    '<th onclick="sortPositions('totalGainPct')" class="' + (posSortCol==='totalGainPct'?'sorted':'') + '">Total %' + arrow('totalGainPct') + '</th>' +
+    '<th onclick="sortPositions('dailyGain')" class="' + (posSortCol==='dailyGain'?'sorted':'') + '">Daily gain' + arrow('dailyGain') + '</th>' +
+    '<th onclick="sortPositions('dailyGainPct')" class="' + (posSortCol==='dailyGainPct'?'sorted':'') + '">Daily %' + arrow('dailyGainPct') + '</th>' +
+    '<th onclick="sortPositions('pctOfPortfolio')" class="' + (posSortCol==='pctOfPortfolio'?'sorted':'') + '">% of portfolio' + arrow('pctOfPortfolio') + '</th>' +
+    '</tr></thead>';
+
+  function buildRows(rowSet) {
+    return rowSet.map(function(r) {
+      const barWidth = Math.min(40, r.pctOfPortfolio * 2);
+      const badge = '<span class="badge ' + badgeClass(r.platform) + '">' + r.platform + '</span>';
+      return '<tr>' +
+        '<td>' + badge + '</td>' +
+        '<td style="font-weight:500">' + r.stock + '</td>' +
+        '<td>' + fmtDec(r.value) + '</td>' +
+        '<td>' + (r.invested ? fmtDec(r.invested) : '—') + '</td>' +
+        gainCell(r.totalGain, r.totalGainPct) +
+        gainCell(r.dailyGain, r.dailyGainPct) +
+        '<td>' + r.pctOfPortfolio.toFixed(1) + '%<span class="pct-bar" style="width:' + barWidth + 'px"></span></td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  let tbody = '';
+  if (posGrouping === 'none') {
+    tbody = '<tbody>' + buildRows(rows) + '</tbody>';
+  } else if (posGrouping === 'platform') {
+    const groups = {};
+    rows.forEach(function(r) { if (!groups[r.platform]) groups[r.platform] = []; groups[r.platform].push(r); });
+    tbody = '<tbody>';
+    Object.keys(groups).sort().forEach(function(g) {
+      const groupTotal = groups[g].reduce(function(s,r) { return s + r.value; }, 0);
+      tbody += '<tr class="group-header"><td colspan="9">' + g + ' &nbsp;&nbsp; ' + fmt(groupTotal) + ' &nbsp; (' + (groupTotal/totalValue*100).toFixed(1) + '% of portfolio)</td></tr>';
+      tbody += buildRows(groups[g]);
+    });
+    tbody += '</tbody>';
+  } else {
+    const groups = {};
+    rows.forEach(function(r) { if (!groups[r.stock]) groups[r.stock] = []; groups[r.stock].push(r); });
+    tbody = '<tbody>';
+    Object.keys(groups).sort().forEach(function(g) {
+      const groupTotal = groups[g].reduce(function(s,r) { return s + r.value; }, 0);
+      tbody += '<tr class="group-header"><td colspan="9">' + g + ' &nbsp;&nbsp; ' + fmt(groupTotal) + ' &nbsp; (' + (groupTotal/totalValue*100).toFixed(1) + '% of portfolio)</td></tr>';
+      tbody += buildRows(groups[g]);
+    });
+    tbody += '</tbody>';
+  }
+
+  container.innerHTML = '<table class="positions-table">' + thead + tbody + '</table>';
+}
+
 </script>
 </body>
 </html>
