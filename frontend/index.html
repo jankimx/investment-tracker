@@ -166,7 +166,7 @@
     <div class="refresh-box">
       <div>
         <strong>Prices auto-refresh weekdays at 4pm ET</strong>
-        <p>Or manually refresh now — uses 1 of your 25 daily API calls.</p>
+        <p id="refresh-info">Or manually refresh now.</p>
       </div>
       <button class="btn btn-green" id="refresh-btn" onclick="refreshPrices()">Refresh now</button>
     </div>
@@ -292,7 +292,7 @@
 function doLogin() {
   const pw = document.getElementById('login-input').value;
   const err = document.getElementById('login-error');
-  const base = localStorage.getItem('inv_api') || 'https://web-production-780915.up.railway.app';
+  const base = localStorage.getItem('inv_api') || 'http://localhost:8080';
   fetch(base + '/auth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -369,10 +369,23 @@ async function loadAll() {
       apiFetch('/summary'), apiFetch('/holdings')
     ]);
     updateDataLists();
+    updateRefreshInfo();
     renderDashboard();
     renderRecent();
     renderHoldings();
   } catch(e) { console.error('loadAll failed', e); }
+}
+
+function updateRefreshInfo() {
+  const count = holdings.length;
+  const remaining = Math.floor(25 / count);
+  const el = document.getElementById('refresh-info');
+  if (!el) return;
+  if (count === 0) {
+    el.textContent = 'Add holdings to enable auto-refresh.';
+  } else {
+    el.textContent = 'Each refresh uses ' + count + ' of your 25 daily API calls — you can refresh ~' + remaining + 'x per day.';
+  }
 }
 
 function updateDataLists() {
