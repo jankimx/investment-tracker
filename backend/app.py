@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import pytz
+import urllib.parse
 
 load_dotenv()
 
@@ -22,6 +23,10 @@ MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 DB_NAME = os.getenv("DB_NAME", "investment_tracker")
 ALPHA_VANTAGE_KEY = os.getenv("ALPHA_VANTAGE_KEY", "")
 APP_PASSWORD = os.getenv("APP_PASSWORD", "welovetofu")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+NOTIFY_VERIZON = os.getenv("NOTIFY_VERIZON", "")
+NOTIFY_ATT = os.getenv("NOTIFY_ATT", "")
+APP_URL = os.getenv("APP_URL", "https://investment-tracker-inky.vercel.app")
 
 client = MongoClient(MONGO_URI)
 db = client[DB_NAME]
@@ -76,6 +81,49 @@ def fetch_price(symbol):
         return None, str(e)
 
 
+def send_sms_notifications(refresh_date, refresh_time):
+    """Send SMS via email-to-text gateways using Resend."""
+    if not RESEND_API_KEY:
+        print("[Notify] No RESEND_API_KEY configured, skipping notifications")
+        return
+
+    recipients = []
+    if NOTIFY_VERIZON:
+        recipients.append(NOTIFY_VERIZON + "@vtext.com")
+    if NOTIFY_ATT:
+        recipients.append(NOTIFY_ATT + "@txt.att.net")
+
+    if not recipients:
+        print("[Notify] No recipients configured, skipping notifications")
+        return
+
+    message = "Portfolio refreshed at " + refresh_time + " ET\nView: " + APP_URL
+
+    for recipient in recipients:
+        try:
+            payload = json.dumps({
+                "from": "Portfolio Tracker <onboarding@resend.dev>",
+                "to": [recipient],
+                "subject": "",
+                "text": message
+            }).encode()
+
+            req = urllib.request.Request(
+                "https://api.resend.com/emails",
+                data=payload,
+                headers={
+                    "Authorization": "Bearer " + RESEND_API_KEY,
+                    "Content-Type": "application/json"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read().decode())
+                print("[Notify] Sent to " + recipient + " - id: " + str(result.get("id")))
+        except Exception as e:
+            print("[Notify] Failed to send to " + recipient + ": " + str(e))
+
+
 def do_refresh_prices():
     holdings = list(holdings_col.find())
     if not holdings:
@@ -121,11 +169,20 @@ def do_refresh_prices():
                 results.append({"stock": symbol, "platform": h["platform"], "shares": shares, "price": price, "value": value})
 
     # Store last refresh timestamp
+    now = datetime.utcnow()
     db["meta"].update_one(
         {"key": "last_refresh"},
-        {"$set": {"key": "last_refresh", "timestamp": datetime.utcnow().isoformat(), "date": today, "count": len(results)}},
+        {"$set": {"key": "last_refresh", "timestamp": now.isoformat(), "date": today, "count": len(results)}},
         upsert=True
     )
+
+    # Send SMS notifications if any holdings were refreshed
+    if len(results) > 0:
+        et = pytz.timezone("America/New_York")
+        et_time = now.astimezone(et) if now.tzinfo else pytz.utc.localize(now).astimezone(et)
+        time_str = et_time.strftime("%I:%M%p").lstrip("0")
+        send_sms_notifications(today, time_str)
+
     return {"refreshed": len(results), "results": results, "errors": errors, "date": today}
 
 
