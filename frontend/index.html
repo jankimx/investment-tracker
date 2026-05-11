@@ -512,25 +512,60 @@ async function renderTransactions() {
   try {
     const txns = await apiFetch('/transactions');
     const el = document.getElementById('txn-list');
-    if (!txns.length) { el.innerHTML = '<div class="empty">No transactions yet.</div>'; return; }
-    let rows = '';
+    if (!txns.length) {
+      el.innerHTML = '<div class="empty">No transactions yet.</div>';
+      return;
+    }
+    el.innerHTML = '';
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    thead.innerHTML = '<tr><th>Date</th><th>Platform</th><th>Ticker</th><th>Action</th><th>Shares</th><th>Price/share</th><th>Total</th><th></th></tr>';
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
     txns.forEach(function(t) {
       const total = (t.shares * t.price_per_share).toFixed(2);
-      const actionColor = t.action === 'buy' ? 'var(--green)' : 'var(--red)';
-      const badge = '<span class="badge ' + badgeClass(t.platform) + '">' + t.platform + '</span>';
-      const delBtn = '<button class="btn btn-sm btn-danger" onclick="deleteTransaction('' + t.id + '')">Del</button>';
-      rows += '<tr>';
-      rows += '<td>' + t.date + '</td>';
-      rows += '<td>' + badge + '</td>';
-      rows += '<td style="font-weight:500">' + t.stock + '</td>';
-      rows += '<td style="color:' + actionColor + ';font-weight:500;text-transform:capitalize">' + t.action + '</td>';
-      rows += '<td class="td-right">' + Number(t.shares).toLocaleString('en-US', {maximumFractionDigits:4}) + '</td>';
-      rows += '<td class="td-right">$' + Number(t.price_per_share).toFixed(2) + '</td>';
-      rows += '<td class="td-right">$' + Number(total).toLocaleString() + '</td>';
-      rows += '<td>' + delBtn + '</td>';
-      rows += '</tr>';
+      const tr = document.createElement('tr');
+      const cells = [
+        t.date,
+        null,
+        t.stock,
+        t.action,
+        Number(t.shares).toLocaleString('en-US', {maximumFractionDigits:4}),
+        '$' + Number(t.price_per_share).toFixed(2),
+        '$' + Number(total).toLocaleString(),
+        null
+      ];
+      cells.forEach(function(cell, idx) {
+        const td = document.createElement('td');
+        if (idx === 1) {
+          const span = document.createElement('span');
+          span.className = 'badge ' + badgeClass(t.platform);
+          span.textContent = t.platform;
+          td.appendChild(span);
+        } else if (idx === 3) {
+          td.textContent = t.action;
+          td.style.color = t.action === 'buy' ? 'var(--green)' : 'var(--red)';
+          td.style.fontWeight = '500';
+          td.style.textTransform = 'capitalize';
+        } else if (idx === 7) {
+          const btn = document.createElement('button');
+          btn.className = 'btn btn-sm btn-danger';
+          btn.textContent = 'Del';
+          btn.setAttribute('data-id', t.id);
+          btn.addEventListener('click', function() {
+            deleteTransaction(this.getAttribute('data-id'));
+          });
+          td.appendChild(btn);
+        } else {
+          td.textContent = cell;
+          if (idx >= 4 && idx <= 6) td.className = 'td-right';
+        }
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
     });
-    el.innerHTML = '<table><thead><tr><th>Date</th><th>Platform</th><th>Ticker</th><th>Action</th><th class="td-right">Shares</th><th class="td-right">Price/share</th><th class="td-right">Total</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+    table.appendChild(tbody);
+    el.appendChild(table);
   } catch(e) { console.error('renderTransactions failed', e); }
 }
 
