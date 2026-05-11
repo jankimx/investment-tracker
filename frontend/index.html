@@ -1005,7 +1005,6 @@ function renderPositionsTable() {
     const aggRows = aggregateRows('stock', rows);
     tbody = '<tbody>' + buildAggregateRows(aggRows, 'stock') + '</tbody>';
   }
-  }
 
   container.innerHTML = '<table class="positions-table">' + thead + tbody + '</table>';
   container.querySelectorAll('th[data-col]').forEach(function(th) {
