@@ -170,8 +170,8 @@
     <div class="refresh-box">
       <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
         <strong>Prices auto-refresh weekdays at 4pm ET</strong>
-        <span id="refresh-info" style="font-size:12px;color:var(--text2);"></span>
         <span id="refresh-status" style="font-size:12px;"></span>
+        <span id="refresh-info" style="font-size:12px;color:var(--text2);"></span>
       </div>
     </div>
     <div class="metric-grid">
@@ -184,11 +184,11 @@
     <div class="filter-row" style="display:flex;gap:12px;align-items:center;margin-bottom:1rem;flex-wrap:wrap;">
       <div style="display:flex;align-items:center;gap:8px;">
         <label style="font-size:12px;color:var(--text2);white-space:nowrap;">Platform</label>
-        <select id="dash-platform" onchange="renderDashboard()" style="min-width:140px;"><option value="all">All platforms</option></select>
+        <select id="dash-platform" onchange="renderDashboard()" style="min-width:160px;padding-right:28px;"><option value="all">All platforms</option></select>
       </div>
       <div style="display:flex;align-items:center;gap:8px;">
         <label style="font-size:12px;color:var(--text2);white-space:nowrap;">View</label>
-        <select id="dash-view" onchange="renderDashboard()" style="min-width:130px;">
+        <select id="dash-view" onchange="renderDashboard()" style="min-width:150px;padding-right:28px;">
           <option value="total">Total value</option>
           <option value="platform">By platform</option>
           <option value="stock">By stock</option>
