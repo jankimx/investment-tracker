@@ -123,7 +123,6 @@
     .sort-arrow { margin-left: 4px; opacity: 0.5; font-size: 10px; }
     .pos-gain { color: var(--green); }
     .pos-loss { color: var(--red); }
-    .pct-bar { display: inline-block; height: 4px; background: var(--blue); border-radius: 2px; margin-left: 6px; opacity: 0.4; vertical-align: middle; }
     .toggle-row { display: flex; gap: 6px; margin-bottom: 10px; }
     .toggle-btn { padding: 5px 12px; font-size: 12px; border: 0.5px solid var(--border2); border-radius: var(--radius); cursor: pointer; background: var(--bg); color: var(--text2); }
     .toggle-btn.active { background: var(--text); color: var(--bg); border-color: var(--text); }
@@ -169,10 +168,10 @@
   <!-- DASHBOARD -->
   <div id="tab-dashboard" class="section active">
     <div class="refresh-box">
-      <div>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
         <strong>Prices auto-refresh weekdays at 4pm ET</strong>
-        <p id="refresh-info"></p>
-        <p id="refresh-status" style="font-size:12px;margin-top:4px;"></p>
+        <span id="refresh-info" style="font-size:12px;color:var(--text2);"></span>
+        <span id="refresh-status" style="font-size:12px;"></span>
       </div>
     </div>
     <div class="metric-grid">
@@ -182,15 +181,19 @@
       <div class="metric"><div class="metric-label">Daily gain / loss</div><div class="metric-value" id="m-daily">--</div><div class="metric-sub" id="m-dailypct"></div></div>
       <div class="metric"><div class="metric-label">Entries logged</div><div class="metric-value" id="m-count">--</div></div>
     </div>
-    <div class="filter-row">
-      <label>Platform:</label>
-      <select id="dash-platform" onchange="renderDashboard()"><option value="all">All platforms</option></select>
-      <label style="margin-left:8px;">View:</label>
-      <select id="dash-view" onchange="renderDashboard()">
-        <option value="total">Total value</option>
-        <option value="platform">By platform</option>
-        <option value="stock">By stock</option>
-      </select>
+    <div class="filter-row" style="display:flex;gap:12px;align-items:center;margin-bottom:1rem;flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:8px;">
+        <label style="font-size:12px;color:var(--text2);white-space:nowrap;">Platform</label>
+        <select id="dash-platform" onchange="renderDashboard()" style="min-width:140px;"><option value="all">All platforms</option></select>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <label style="font-size:12px;color:var(--text2);white-space:nowrap;">View</label>
+        <select id="dash-view" onchange="renderDashboard()" style="min-width:130px;">
+          <option value="total">Total value</option>
+          <option value="platform">By platform</option>
+          <option value="stock">By stock</option>
+        </select>
+      </div>
     </div>
     <div class="card">
       <div class="card-title">Portfolio value over time</div>
@@ -199,7 +202,6 @@
         <canvas id="growthChart"></canvas>
       </div>
     </div>
-    <div id="platform-cards" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;"></div>
   </div>
 
   <!-- POSITIONS TABLE -->
@@ -610,7 +612,7 @@ function renderDashboard() {
   document.getElementById('m-invested').textContent = fmt(summary.total_invested);
   const gain = summary.total_gain;
   const gainEl = document.getElementById('m-gain');
-  gainEl.textContent = (gain>=0?'+':'')+fmt(gain);
+  gainEl.textContent = (gain>=0?'+':'-') + '$' + Math.abs(Math.round(gain)).toLocaleString();
   gainEl.className = 'metric-value '+(gain>=0?'positive':'negative');
   document.getElementById('m-gainpct').textContent = summary.total_invested>0?((gain/summary.total_invested)*100).toFixed(1)+'%':'';
   document.getElementById('m-count').textContent = summary.entry_count;
@@ -620,7 +622,7 @@ function renderDashboard() {
   const dailyPctEl = document.getElementById('m-dailypct');
   if (summary.daily_gain !== null && summary.daily_gain !== undefined) {
     const dg = summary.daily_gain;
-    dailyEl.textContent = (dg >= 0 ? '+' : '') + fmt(dg);
+    dailyEl.textContent = (dg >= 0 ? '+' : '-') + '$' + Math.abs(Math.round(dg)).toLocaleString();
     dailyEl.className = 'metric-value ' + (dg >= 0 ? 'positive' : 'negative');
     dailyPctEl.textContent = summary.daily_gain_pct !== null ? (dg >= 0 ? '+' : '') + summary.daily_gain_pct + '%' : '';
   } else {
@@ -636,8 +638,6 @@ function renderDashboard() {
   const filtered = pfSel.value==='all'?entries:entries.filter(e=>e.platform===pfSel.value);
   renderGrowthChart(filtered, document.getElementById('dash-view').value);
 
-  document.getElementById('platform-cards').innerHTML = Object.entries(summary.platforms).map(([p,v])=>
-    '<div class="metric" style="cursor:pointer" onclick="document.getElementById(\'dash-platform\').value=\''+p+'\';renderDashboard()"><div class="metric-label">'+p+'</div><div class="metric-value">'+fmt(v)+'</div><div class="metric-sub">'+((v/summary.total_value)*100).toFixed(1)+'% of total</div></div>'
   ).join('');
 }
 
@@ -895,7 +895,6 @@ function renderPositionsTable() {
   function buildRows(rowSet) {
     return rowSet.map(function(r) {
       const tr = document.createElement('tr');
-      const barWidth = Math.min(40, r.pctOfPortfolio * 2);
 
       const td1 = document.createElement('td');
       const badge = document.createElement('span');
@@ -917,13 +916,7 @@ function renderPositionsTable() {
       td4.textContent = r.invested ? fmtDec(r.invested) : '--';
 
       const td7 = document.createElement('td');
-      const pctSpan = document.createElement('span');
-      pctSpan.textContent = r.pctOfPortfolio.toFixed(1) + '%';
-      const bar = document.createElement('span');
-      bar.className = 'pct-bar';
-      bar.style.width = barWidth + 'px';
-      td7.appendChild(pctSpan);
-      td7.appendChild(bar);
+      td7.textContent = r.pctOfPortfolio.toFixed(1) + '%';
 
       const gainCells = makeGainCells(r.totalGain, r.totalGainPct);
       const dailyCells = makeGainCells(r.dailyGain, r.dailyGainPct);
@@ -943,11 +936,11 @@ function renderPositionsTable() {
       td2.textContent = '--';
     } else {
       const cls = val >= 0 ? 'pos-gain' : 'pos-loss';
-      const sign = val >= 0 ? '+' : '';
+      const sign = val >= 0 ? '+' : '-';
       td1.className = cls;
       td1.textContent = sign + '$' + Math.abs(Math.round(val)).toLocaleString();
       td2.className = cls;
-      td2.textContent = pct !== null ? sign + pct.toFixed(1) + '%' : '';
+      td2.textContent = pct !== null ? sign + Math.abs(pct).toFixed(1) + '%' : '';
     }
     return [td1, td2];
   }
