@@ -948,19 +948,63 @@ function renderPositionsTable() {
     return [td1, td2];
   }
 
+  function aggregateRows(groupKey, rows) {
+    const groups = {};
+    rows.forEach(function(r) {
+      const g = r[groupKey];
+      if (!groups[g]) groups[g] = [];
+      groups[g].push(r);
+    });
+    return Object.keys(groups).map(function(g) {
+      const grp = groups[g];
+      const value = grp.reduce(function(s,r) { return s + r.value; }, 0);
+      const invested = grp.reduce(function(s,r) { return s + r.invested; }, 0);
+      const totalGain = invested > 0 ? value - invested : null;
+      const totalGainPct = (invested > 0) ? ((value - invested) / invested * 100) : null;
+      const dailyRows = grp.filter(function(r) { return r.dailyGain !== null; });
+      const dailyGain = dailyRows.length > 0 ? dailyRows.reduce(function(s,r) { return s + r.dailyGain; }, 0) : null;
+      const prevTotal = dailyRows.reduce(function(s,r) { return s + (r.value - r.dailyGain); }, 0);
+      const dailyGainPct = (dailyGain !== null && prevTotal > 0) ? (dailyGain / prevTotal * 100) : null;
+      const pctOfPortfolio = value / totalValue * 100;
+      return { label: g, groupKey: groupKey, value: value, invested: invested, totalGain: totalGain, totalGainPct: totalGainPct, dailyGain: dailyGain, dailyGainPct: dailyGainPct, pctOfPortfolio: pctOfPortfolio };
+    }).sort(function(a,b) { return (b.value - a.value) * posSortDir; });
+  }
+
+  function buildAggregateRows(aggRows, groupKey) {
+    return aggRows.map(function(r) {
+      const tr = document.createElement('tr');
+      const td1 = document.createElement('td');
+      td1.colSpan = 2;
+      if (groupKey === 'platform') {
+        const badge = document.createElement('span');
+        badge.className = 'badge ' + badgeClass(r.label);
+        badge.textContent = r.label;
+        td1.appendChild(badge);
+      } else {
+        td1.textContent = r.label;
+        td1.style.fontWeight = '500';
+      }
+      const tdSpark = document.createElement('td');
+      const td3 = document.createElement('td'); td3.textContent = fmtDec(r.value);
+      const td4 = document.createElement('td'); td4.textContent = r.invested ? fmtDec(r.invested) : '--';
+      const gainCells = makeGainCells(r.totalGain, r.totalGainPct);
+      const dailyCells = makeGainCells(r.dailyGain, r.dailyGainPct);
+      const td7 = document.createElement('td'); td7.textContent = r.pctOfPortfolio.toFixed(1) + '%';
+      [td1, tdSpark, td3, td4, gainCells[0], gainCells[1], dailyCells[0], dailyCells[1], td7].forEach(function(td) { tr.appendChild(td); });
+      return tr.outerHTML;
+    }).join('');
+  }
+
   let tbody = '';
   if (posGrouping === 'none') {
     tbody = '<tbody>' + buildRows(rows) + '</tbody>';
   } else if (posGrouping === 'platform') {
-    const groups = {};
-    rows.forEach(function(r) { if (!groups[r.platform]) groups[r.platform] = []; groups[r.platform].push(r); });
-    tbody = '<tbody>';
-    Object.keys(groups).sort().forEach(function(g) {
-      const groupTotal = groups[g].reduce(function(s,r) { return s + r.value; }, 0);
-      tbody += '<tr class="group-header"><td colspan="10">' + g + ' &nbsp;&nbsp; ' + fmt(groupTotal) + ' &nbsp; (' + (groupTotal/totalValue*100).toFixed(1) + '% of portfolio)</td></tr>';
-      tbody += buildRows(groups[g]);
-    });
-    tbody += '</tbody>';
+    const aggRows = aggregateRows('platform', rows);
+    tbody = '<tbody>' + buildAggregateRows(aggRows, 'platform') + '</tbody>';
+  } else {
+    const aggRows = aggregateRows('stock', rows);
+    tbody = '<tbody>' + buildAggregateRows(aggRows, 'stock') + '</tbody>';
+  }
   } else {
     const groups = {};
     rows.forEach(function(r) { if (!groups[r.stock]) groups[r.stock] = []; groups[r.stock].push(r); });
