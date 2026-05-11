@@ -108,6 +108,8 @@
     .refresh-box strong { color: var(--text); font-weight: 500; }
     .hint { font-size: 12px; color: var(--text3); margin-top: 6px; }
     .schedule-badge { font-size: 11px; background: #E1F5EE; color: #085041; padding: 3px 8px; border-radius: 4px; font-weight: 500; }
+    .sparkline { display: inline-block; vertical-align: middle; }
+
     .positions-table { width: 100%; border-collapse: collapse; font-size: 13px; }
     .positions-table th { text-align: right; font-size: 11px; font-weight: 500; color: var(--text3); padding: 7px 10px; border-bottom: 0.5px solid var(--border); text-transform: uppercase; letter-spacing: 0.04em; cursor: pointer; user-select: none; white-space: nowrap; }
     .positions-table th:first-child, .positions-table th:nth-child(2) { text-align: left; }
@@ -831,6 +833,7 @@ function renderPositionsTable() {
   const cols = [
     {key:'platform', label:'Platform'},
     {key:'stock', label:'Stock'},
+    {key:null, label:'7d trend'},
     {key:'value', label:'Value'},
     {key:null, label:'Cost basis'},
     {key:'totalGain', label:'Total gain'},
@@ -853,6 +856,42 @@ function renderPositionsTable() {
   theadHtml += '</tr></thead>';
   const thead = theadHtml;
 
+  function buildSparkline(platform, stock) {
+    // Get last 7 days of values for this position
+    const key = platform + '||' + stock;
+    const pts = [];
+    const seen = {};
+    entries.forEach(function(e) {
+      const k = e.platform + '||' + e.stock;
+      if (k === key && !seen[e.date]) {
+        seen[e.date] = true;
+        pts.push({date: e.date, value: e.value});
+      }
+    });
+    pts.sort(function(a,b) { return a.date < b.date ? -1 : 1; });
+    const last7 = pts.slice(-7);
+    if (last7.length < 2) return '<span style="color:var(--text3);font-size:11px;">--</span>';
+
+    const vals = last7.map(function(p) { return p.value; });
+    const min = Math.min.apply(null, vals);
+    const max = Math.max.apply(null, vals);
+    const range = max - min || 1;
+    const W = 60, H = 24, pad = 2;
+
+    const points = vals.map(function(v, i) {
+      const x = pad + (i / (vals.length - 1)) * (W - pad * 2);
+      const y = pad + (1 - (v - min) / range) * (H - pad * 2);
+      return x.toFixed(1) + ',' + y.toFixed(1);
+    }).join(' ');
+
+    const isUp = vals[vals.length-1] >= vals[0];
+    const color = isUp ? '#1D9E75' : '#E24B4A';
+
+    return '<svg class="sparkline" width="' + W + '" height="' + H + '" viewBox="0 0 ' + W + ' ' + H + '">' +
+      '<polyline points="' + points + '" fill="none" stroke="' + color + '" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>' +
+      '</svg>';
+  }
+
   function buildRows(rowSet) {
     return rowSet.map(function(r) {
       const tr = document.createElement('tr');
@@ -867,6 +906,9 @@ function renderPositionsTable() {
       const td2 = document.createElement('td');
       td2.textContent = r.stock;
       td2.style.fontWeight = '500';
+
+      const tdSpark = document.createElement('td');
+      tdSpark.innerHTML = buildSparkline(r.platform, r.stock);
 
       const td3 = document.createElement('td');
       td3.textContent = fmtDec(r.value);
@@ -886,7 +928,7 @@ function renderPositionsTable() {
       const gainCells = makeGainCells(r.totalGain, r.totalGainPct);
       const dailyCells = makeGainCells(r.dailyGain, r.dailyGainPct);
 
-      [td1, td2, td3, td4, gainCells[0], gainCells[1], dailyCells[0], dailyCells[1], td7].forEach(function(td) {
+      [td1, td2, tdSpark, td3, td4, gainCells[0], gainCells[1], dailyCells[0], dailyCells[1], td7].forEach(function(td) {
         tr.appendChild(td);
       });
       return tr.outerHTML;
@@ -919,7 +961,7 @@ function renderPositionsTable() {
     tbody = '<tbody>';
     Object.keys(groups).sort().forEach(function(g) {
       const groupTotal = groups[g].reduce(function(s,r) { return s + r.value; }, 0);
-      tbody += '<tr class="group-header"><td colspan="9">' + g + ' &nbsp;&nbsp; ' + fmt(groupTotal) + ' &nbsp; (' + (groupTotal/totalValue*100).toFixed(1) + '% of portfolio)</td></tr>';
+      tbody += '<tr class="group-header"><td colspan="10">' + g + ' &nbsp;&nbsp; ' + fmt(groupTotal) + ' &nbsp; (' + (groupTotal/totalValue*100).toFixed(1) + '% of portfolio)</td></tr>';
       tbody += buildRows(groups[g]);
     });
     tbody += '</tbody>';
@@ -929,7 +971,7 @@ function renderPositionsTable() {
     tbody = '<tbody>';
     Object.keys(groups).sort().forEach(function(g) {
       const groupTotal = groups[g].reduce(function(s,r) { return s + r.value; }, 0);
-      tbody += '<tr class="group-header"><td colspan="9">' + g + ' &nbsp;&nbsp; ' + fmt(groupTotal) + ' &nbsp; (' + (groupTotal/totalValue*100).toFixed(1) + '% of portfolio)</td></tr>';
+      tbody += '<tr class="group-header"><td colspan="10">' + g + ' &nbsp;&nbsp; ' + fmt(groupTotal) + ' &nbsp; (' + (groupTotal/totalValue*100).toFixed(1) + '% of portfolio)</td></tr>';
       tbody += buildRows(groups[g]);
     });
     tbody += '</tbody>';
