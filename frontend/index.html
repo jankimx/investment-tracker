@@ -443,9 +443,9 @@ function updateRefreshInfo() {
   const el = document.getElementById('refresh-info');
   if (!el) return;
   if (count === 0) {
-    el.textContent = 'Add holdings to enable auto-refresh.';
+    el.innerHTML = 'Add holdings to enable auto-refresh.';
   } else {
-    el.textContent = 'Each refresh uses ' + count + ' of your 25 daily API calls   you can refresh ~' + remaining + 'x per day.';
+    el.innerHTML = 'Each refresh uses <strong style="color:var(--text);font-weight:700;">' + count + '</strong> of your 25 daily API calls &mdash; you can refresh ~' + remaining + 'x per day.';
   }
 }
 
