@@ -388,7 +388,7 @@ async function testConnection() {
     await apiFetch('/health');
     await loadAll();
   } catch(e) {
-    showToast('Cannot reach API — check connection', 4000);
+    showToast('Cannot reach API -- check connection', 4000);
   }
 }
 
@@ -730,7 +730,7 @@ function init() {
 // Auto-init if already logged in
 if (sessionStorage.getItem('inv_auth')) init();
 
-// ── Positions Table ───────────────────────────────────────
+// -- Positions Table ---------------------------------------
 let posGrouping = 'none';
 let posSortCol = 'value';
 let posSortDir = -1; // -1 = desc, 1 = asc
@@ -810,44 +810,104 @@ function renderPositionsTable() {
   rows.sort(sortFns[posSortCol] || sortFns['value']);
 
   function arrow(col) {
-    if (posSortCol !== col) return '<span class="sort-arrow">↕</span>';
-    return '<span class="sort-arrow">' + (posSortDir === -1 ? '↓' : '↑') + '</span>';
+    if (posSortCol !== col) return '<span class="sort-arrow">-</span>';
+    return '<span class="sort-arrow">' + (posSortDir === -1 ? 'v' : '^') + '</span>';
   }
 
   function gainCell(val, pct) {
-    if (val === null) return '<td>—</td><td>—</td>';
+    if (val === null) return '<td>--</td><td>--</td>';
     const cls = val >= 0 ? 'pos-gain' : 'pos-loss';
     const sign = val >= 0 ? '+' : '';
     const pctStr = pct !== null ? sign + pct.toFixed(1) + '%' : '';
-    return '<td class="' + cls + '">' + sign + fmt(val) + '</td><td class="' + cls + '">' + pctStr + '</td>';
+    const td1 = document.createElement('td');
+    td1.className = cls;
+    td1.textContent = sign + '$' + Math.abs(Math.round(val)).toLocaleString();
+    const td2 = document.createElement('td');
+    td2.className = cls;
+    td2.textContent = pctStr;
+    return td1.outerHTML + td2.outerHTML;
   }
 
-  const thead = '<thead><tr>' +
-    '<th onclick="sortPositions('platform')" class="' + (posSortCol==='platform'?'sorted':'') + '">Platform' + arrow('platform') + '</th>' +
-    '<th onclick="sortPositions('stock')" class="' + (posSortCol==='stock'?'sorted':'') + '">Stock' + arrow('stock') + '</th>' +
-    '<th onclick="sortPositions('value')" class="' + (posSortCol==='value'?'sorted':'') + '">Value' + arrow('value') + '</th>' +
-    '<th>Cost basis</th>' +
-    '<th onclick="sortPositions('totalGain')" class="' + (posSortCol==='totalGain'?'sorted':'') + '">Total gain' + arrow('totalGain') + '</th>' +
-    '<th onclick="sortPositions('totalGainPct')" class="' + (posSortCol==='totalGainPct'?'sorted':'') + '">Total %' + arrow('totalGainPct') + '</th>' +
-    '<th onclick="sortPositions('dailyGain')" class="' + (posSortCol==='dailyGain'?'sorted':'') + '">Daily gain' + arrow('dailyGain') + '</th>' +
-    '<th onclick="sortPositions('dailyGainPct')" class="' + (posSortCol==='dailyGainPct'?'sorted':'') + '">Daily %' + arrow('dailyGainPct') + '</th>' +
-    '<th onclick="sortPositions('pctOfPortfolio')" class="' + (posSortCol==='pctOfPortfolio'?'sorted':'') + '">% of portfolio' + arrow('pctOfPortfolio') + '</th>' +
-    '</tr></thead>';
+  const cols = [
+    {key:'platform', label:'Platform'},
+    {key:'stock', label:'Stock'},
+    {key:'value', label:'Value'},
+    {key:null, label:'Cost basis'},
+    {key:'totalGain', label:'Total gain'},
+    {key:'totalGainPct', label:'Total %'},
+    {key:'dailyGain', label:'Daily gain'},
+    {key:'dailyGainPct', label:'Daily %'},
+    {key:'pctOfPortfolio', label:'% of portfolio'}
+  ];
+  let theadHtml = '<thead><tr>';
+  cols.forEach(function(c) {
+    if (!c.key) {
+      theadHtml += '<th>' + c.label + '</th>';
+    } else {
+      const isSorted = posSortCol === c.key;
+      const arrowChar = isSorted ? (posSortDir === -1 ? ' v' : ' ^') : ' -';
+      const cls = isSorted ? 'sorted' : '';
+      theadHtml += '<th class="' + cls + '" data-col="' + c.key + '">' + c.label + arrowChar + '</th>';
+    }
+  });
+  theadHtml += '</tr></thead>';
+  const thead = theadHtml;
 
   function buildRows(rowSet) {
     return rowSet.map(function(r) {
+      const tr = document.createElement('tr');
       const barWidth = Math.min(40, r.pctOfPortfolio * 2);
-      const badge = '<span class="badge ' + badgeClass(r.platform) + '">' + r.platform + '</span>';
-      return '<tr>' +
-        '<td>' + badge + '</td>' +
-        '<td style="font-weight:500">' + r.stock + '</td>' +
-        '<td>' + fmtDec(r.value) + '</td>' +
-        '<td>' + (r.invested ? fmtDec(r.invested) : '—') + '</td>' +
-        gainCell(r.totalGain, r.totalGainPct) +
-        gainCell(r.dailyGain, r.dailyGainPct) +
-        '<td>' + r.pctOfPortfolio.toFixed(1) + '%<span class="pct-bar" style="width:' + barWidth + 'px"></span></td>' +
-        '</tr>';
+
+      const td1 = document.createElement('td');
+      const badge = document.createElement('span');
+      badge.className = 'badge ' + badgeClass(r.platform);
+      badge.textContent = r.platform;
+      td1.appendChild(badge);
+
+      const td2 = document.createElement('td');
+      td2.textContent = r.stock;
+      td2.style.fontWeight = '500';
+
+      const td3 = document.createElement('td');
+      td3.textContent = fmtDec(r.value);
+
+      const td4 = document.createElement('td');
+      td4.textContent = r.invested ? fmtDec(r.invested) : '--';
+
+      const td7 = document.createElement('td');
+      const pctSpan = document.createElement('span');
+      pctSpan.textContent = r.pctOfPortfolio.toFixed(1) + '%';
+      const bar = document.createElement('span');
+      bar.className = 'pct-bar';
+      bar.style.width = barWidth + 'px';
+      td7.appendChild(pctSpan);
+      td7.appendChild(bar);
+
+      const gainCells = makeGainCells(r.totalGain, r.totalGainPct);
+      const dailyCells = makeGainCells(r.dailyGain, r.dailyGainPct);
+
+      [td1, td2, td3, td4, gainCells[0], gainCells[1], dailyCells[0], dailyCells[1], td7].forEach(function(td) {
+        tr.appendChild(td);
+      });
+      return tr.outerHTML;
     }).join('');
+  }
+
+  function makeGainCells(val, pct) {
+    const td1 = document.createElement('td');
+    const td2 = document.createElement('td');
+    if (val === null) {
+      td1.textContent = '--';
+      td2.textContent = '--';
+    } else {
+      const cls = val >= 0 ? 'pos-gain' : 'pos-loss';
+      const sign = val >= 0 ? '+' : '';
+      td1.className = cls;
+      td1.textContent = sign + '$' + Math.abs(Math.round(val)).toLocaleString();
+      td2.className = cls;
+      td2.textContent = pct !== null ? sign + pct.toFixed(1) + '%' : '';
+    }
+    return [td1, td2];
   }
 
   let tbody = '';
@@ -876,6 +936,11 @@ function renderPositionsTable() {
   }
 
   container.innerHTML = '<table class="positions-table">' + thead + tbody + '</table>';
+  container.querySelectorAll('th[data-col]').forEach(function(th) {
+    th.addEventListener('click', function() {
+      sortPositions(this.getAttribute('data-col'));
+    });
+  });
 }
 
 </script>
