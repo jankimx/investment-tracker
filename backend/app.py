@@ -120,6 +120,12 @@ def do_refresh_prices():
                 )
                 results.append({"stock": symbol, "platform": h["platform"], "shares": shares, "price": price, "value": value})
 
+    # Store last refresh timestamp
+    db["meta"].update_one(
+        {"key": "last_refresh"},
+        {"$set": {"key": "last_refresh", "timestamp": datetime.utcnow().isoformat(), "date": today, "count": len(results)}},
+        upsert=True
+    )
     return {"refreshed": len(results), "results": results, "errors": errors, "date": today}
 
 
@@ -136,6 +142,19 @@ scheduler.start()
 
 
 # ── Auth ──────────────────────────────────────────────────
+
+@app.route("/refresh-status", methods=["GET"])
+def refresh_status():
+    meta = db["meta"].find_one({"key": "last_refresh"})
+    if not meta:
+        return jsonify({"refreshed_today": False, "last_refresh": None, "date": None})
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    return jsonify({
+        "refreshed_today": meta.get("date") == today,
+        "last_refresh": meta.get("timestamp"),
+        "date": meta.get("date"),
+        "count": meta.get("count", 0)
+    })
 
 @app.route("/auth", methods=["POST"])
 def auth():
