@@ -335,8 +335,7 @@
 function doLogin() {
   const pw = document.getElementById('login-input').value;
   const err = document.getElementById('login-error');
-  const base = localStorage.getItem('inv_api') || 'http://localhost:8080';
-  fetch(base + '/auth', {
+  fetch(API_BASE + '/auth', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ password: pw })
