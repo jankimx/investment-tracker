@@ -63,8 +63,12 @@ def serialize(doc):
 
 
 def fetch_price(symbol):
+    """Returns (price, prev_close, error).
+    price = current/latest price
+    prev_close = previous trading day close (for daily gain calculation)
+    """
     if not ALPHA_VANTAGE_KEY:
-        return None, "No API key configured"
+        return None, None, "No API key configured"
     try:
         url = "https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=" + symbol + "&apikey=" + ALPHA_VANTAGE_KEY
         req = urllib.request.Request(url)
@@ -72,13 +76,14 @@ def fetch_price(symbol):
             data = json.loads(response.read().decode())
         quote = data.get("Global Quote", {})
         price = quote.get("05. price")
+        prev_close = quote.get("08. previous close")
         if price:
-            return float(price), None
+            return float(price), float(prev_close) if prev_close else None, None
         if "Note" in data or "Information" in data:
-            return None, "API rate limit reached"
-        return None, "No price data for " + symbol
+            return None, None, "API rate limit reached"
+        return None, None, "No price data for " + symbol
     except Exception as e:
-        return None, str(e)
+        return None, None, str(e)
 
 
 def send_sms_notifications(refresh_date, refresh_time):
@@ -138,8 +143,8 @@ def do_refresh_prices():
 
     def process_holding(h):
         symbol = h["stock"].upper()
-        price, error = fetch_price(symbol)
-        return h, symbol, price, error
+        price, prev_close, error = fetch_price(symbol)
+        return h, symbol, price, prev_close, error
 
     batches = [holdings[i:i+BATCH_SIZE] for i in range(0, len(holdings), BATCH_SIZE)]
 
@@ -149,24 +154,29 @@ def do_refresh_prices():
         with ThreadPoolExecutor(max_workers=BATCH_SIZE) as executor:
             futures = {executor.submit(process_holding, h): h for h in batch}
             for future in as_completed(futures):
-                h, symbol, price, error = future.result()
+                h, symbol, price, prev_close, error = future.result()
                 if price is None:
                     errors.append({"stock": symbol, "platform": h["platform"], "error": error})
                     continue
                 shares = h["shares"]
                 value = round(price * shares, 2)
                 invested = round(h.get("cost_basis", 0) * shares, 2)
+                prev_value = round(prev_close * shares, 2) if prev_close else None
+                daily_gain = round(value - prev_value, 2) if prev_value else None
+                daily_gain_pct = round((daily_gain / prev_value * 100), 2) if (daily_gain is not None and prev_value) else None
                 entries_col.update_one(
                     {"date": today, "platform": h["platform"], "stock": h["stock"]},
                     {"$set": {
                         "date": today, "platform": h["platform"], "stock": h["stock"],
                         "value": value, "invested": invested, "shares": shares,
-                        "price": price, "auto_logged": True,
+                        "price": price, "prev_close": prev_close,
+                        "daily_gain": daily_gain, "daily_gain_pct": daily_gain_pct,
+                        "auto_logged": True,
                         "updated_at": datetime.utcnow().isoformat()
                     }},
                     upsert=True
                 )
-                results.append({"stock": symbol, "platform": h["platform"], "shares": shares, "price": price, "value": value})
+                results.append({"stock": symbol, "platform": h["platform"], "shares": shares, "price": price, "value": value, "daily_gain": daily_gain})
 
     # Store last refresh timestamp
     now = datetime.utcnow()
@@ -379,24 +389,13 @@ def get_summary():
     total_value = sum(e["value"] for e in latest.values())
     total_invested = sum(e.get("invested", 0) for e in latest.values())
 
-    # Daily gain/loss — compare latest date vs previous date
-    all_dates = sorted(set(e["date"] for e in all_entries), reverse=True)
+    # Daily gain/loss — use stored daily_gain from price fetch (Method 1: vs previous close)
     daily_gain = None
     daily_gain_pct = None
-    if len(all_dates) >= 2:
-        today_date = all_dates[0]
-        prev_date = all_dates[1]
-        today_entries = {}
-        prev_entries = {}
-        for e in all_entries:
-            k = e["platform"] + "||" + e["stock"]
-            if e["date"] == today_date and k not in today_entries:
-                today_entries[k] = e
-            if e["date"] == prev_date and k not in prev_entries:
-                prev_entries[k] = e
-        today_total = sum(e["value"] for e in today_entries.values())
-        prev_total = sum(e["value"] for e in prev_entries.values())
-        daily_gain = round(today_total - prev_total, 2)
+    daily_gains = [e.get("daily_gain") for e in latest.values() if e.get("daily_gain") is not None]
+    if daily_gains:
+        daily_gain = round(sum(daily_gains), 2)
+        prev_total = sum(e["value"] - e.get("daily_gain", 0) for e in latest.values() if e.get("daily_gain") is not None)
         daily_gain_pct = round((daily_gain / prev_total * 100), 2) if prev_total > 0 else 0
 
     platforms = {}

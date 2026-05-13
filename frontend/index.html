@@ -779,8 +779,12 @@ function renderPositionsTable() {
   // Build rows
   let rows = Object.values(latest).map(function(e) {
     const prev = prevLatest[e.platform + '||' + e.stock];
-    const dailyGain = prev ? e.value - prev.value : null;
-    const dailyGainPct = (prev && prev.value > 0) ? ((e.value - prev.value) / prev.value * 100) : null;
+    // Use stored daily_gain from price fetch (vs previous close) if available
+    // Fall back to comparing with previous snapshot if not
+    const dailyGain = (e.daily_gain !== undefined && e.daily_gain !== null) ? e.daily_gain :
+                      (prev ? e.value - prev.value : null);
+    const dailyGainPct = (e.daily_gain_pct !== undefined && e.daily_gain_pct !== null) ? e.daily_gain_pct :
+                         (prev && prev.value > 0 ? ((e.value - prev.value) / prev.value * 100) : null);
     const totalGain = e.invested ? e.value - e.invested : null;
     const totalGainPct = (e.invested && e.invested > 0) ? ((e.value - e.invested) / e.invested * 100) : null;
     const pctOfPortfolio = (e.value / totalValue * 100);
@@ -962,8 +966,8 @@ function renderPositionsTable() {
       const totalGainPct = (invested > 0) ? ((value - invested) / invested * 100) : null;
       const dailyRows = grp.filter(function(r) { return r.dailyGain !== null; });
       const dailyGain = dailyRows.length > 0 ? dailyRows.reduce(function(s,r) { return s + r.dailyGain; }, 0) : null;
-      const prevTotal = dailyRows.reduce(function(s,r) { return s + (r.value - r.dailyGain); }, 0);
-      const dailyGainPct = (dailyGain !== null && prevTotal > 0) ? (dailyGain / prevTotal * 100) : null;
+      const prevTotalAgg = dailyRows.reduce(function(s,r) { return s + (r.value - r.dailyGain); }, 0);
+      const dailyGainPct = (dailyGain !== null && prevTotalAgg > 0) ? (dailyGain / prevTotalAgg * 100) : null;
       const pctOfPortfolio = value / totalValue * 100;
       return { label: g, groupKey: groupKey, value: value, invested: invested, totalGain: totalGain, totalGainPct: totalGainPct, dailyGain: dailyGain, dailyGainPct: dailyGainPct, pctOfPortfolio: pctOfPortfolio };
     }).sort(function(a,b) { return (b.value - a.value) * posSortDir; });
