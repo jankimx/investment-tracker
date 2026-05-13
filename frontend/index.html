@@ -649,11 +649,11 @@ function renderGrowthChart(data, view) {
   const latestAt = (subset,d) => { const combos={}; for(const e of subset.filter(e=>e.date<=d)){const k=e.platform+'||'+e.stock; if(!combos[k]||e.date>combos[k].date)combos[k]=e;} return Object.values(combos).reduce((s,e)=>s+e.value,0); };
   let datasets=[];
   if(view==='total'){
-    datasets=[{label:'Total',data:allDates.map(d=>Math.round(latestAt(data,d))),borderColor:'#3266ad',backgroundColor:'rgba(50,102,173,0.07)',fill:true,tension:0.35,pointRadius:3}];
+    datasets=[{label:'Total',data:allDates.map(d=>Math.round(latestAt(data,d))),borderColor:'#3266ad',backgroundColor:'rgba(50,102,173,0.07)',fill:true,tension:0,pointRadius:3}];
     document.getElementById('chart-legend').innerHTML='<span class="legend-item"><span class="legend-swatch" style="background:#3266ad"></span>Total value</span>';
   } else {
     const keys=view==='platform'?[...new Set(data.map(e=>e.platform))]:[...new Set(data.map(e=>e.stock))];
-    datasets=keys.map(k=>{const color=colorFor(k);const subset=data.filter(e=>(view==='platform'?e.platform:e.stock)===k);return{label:k,data:allDates.map(d=>Math.round(latestAt(subset,d))),borderColor:color,fill:false,tension:0.35,pointRadius:3};});
+    datasets=keys.map(k=>{const color=colorFor(k);const subset=data.filter(e=>(view==='platform'?e.platform:e.stock)===k);return{label:k,data:allDates.map(d=>Math.round(latestAt(subset,d))),borderColor:color,fill:false,tension:0,pointRadius:3};});
     document.getElementById('chart-legend').innerHTML=datasets.map(d=>'<span class="legend-item"><span class="legend-swatch" style="background:'+d.borderColor+'"></span>'+d.label+'</span>').join('');
   }
   if(growthChart)growthChart.destroy();
@@ -720,7 +720,7 @@ function renderProjections() {
   const base=compound(start,monthly,rate,years),pess=compound(start,monthly,low,years),opt=compound(start,monthly,high,years);
   const labels=base.map(d=>d.year===0?'Now':'Year '+d.year);
   if(projChart)projChart.destroy();
-  projChart=new Chart(document.getElementById('projChart'),{type:'line',data:{labels,datasets:[{label:'Base',data:base.map(d=>Math.round(d.value)),borderColor:'#3266ad',backgroundColor:'rgba(50,102,173,0.05)',fill:true,tension:0.4,pointRadius:2},{label:'Optimistic',data:opt.map(d=>Math.round(d.value)),borderColor:'#639922',fill:false,tension:0.4,pointRadius:2,borderDash:[5,3]},{label:'Pessimistic',data:pess.map(d=>Math.round(d.value)),borderColor:'#E24B4A',fill:false,tension:0.4,pointRadius:2,borderDash:[3,3]},{label:'Contributed',data:base.map(d=>Math.round(d.contributed)),borderColor:'#888',fill:false,tension:0,pointRadius:0,borderDash:[2,4]}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmt(c.parsed.y)}}},scales:{x:{ticks:{font:{size:11},color:'#888',maxTicksLimit:10},grid:{display:false}},y:{ticks:{callback:v=>fmt(v),font:{size:11},color:'#888',maxTicksLimit:6},grid:{color:'rgba(128,128,128,0.1)'}}}}});
+  projChart=new Chart(document.getElementById('projChart'),{type:'line',data:{labels,datasets:[{label:'Base',data:base.map(d=>Math.round(d.value)),borderColor:'#3266ad',backgroundColor:'rgba(50,102,173,0.05)',fill:true,tension:0,pointRadius:2},{label:'Optimistic',data:opt.map(d=>Math.round(d.value)),borderColor:'#639922',fill:false,tension:0,pointRadius:2,borderDash:[5,3]},{label:'Pessimistic',data:pess.map(d=>Math.round(d.value)),borderColor:'#E24B4A',fill:false,tension:0,pointRadius:2,borderDash:[3,3]},{label:'Contributed',data:base.map(d=>Math.round(d.contributed)),borderColor:'#888',fill:false,tension:0,pointRadius:0,borderDash:[2,4]}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.dataset.label+': '+fmt(c.parsed.y)}}},scales:{x:{ticks:{font:{size:11},color:'#888',maxTicksLimit:10},grid:{display:false}},y:{ticks:{callback:v=>fmt(v),font:{size:11},color:'#888',maxTicksLimit:6},grid:{color:'rgba(128,128,128,0.1)'}}}}});
   document.getElementById('proj-body').innerHTML=base.map((d,i)=>'<tr><td>'+(d.year===0?'Now':'Year '+d.year)+'</td><td class="td-right" style="color:var(--red)">'+fmt(pess[i].value)+'</td><td class="td-right" style="font-weight:500">'+fmt(d.value)+'</td><td class="td-right" style="color:var(--green)">'+fmt(opt[i].value)+'</td><td class="td-right" style="color:var(--text3)">'+fmt(d.contributed)+'</td></tr>').join('');
 }
 
