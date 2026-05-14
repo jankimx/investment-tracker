@@ -73,8 +73,11 @@ def fetch_all_data(symbol):
             results[name] = data
 
     # Validate critical data exists
+    data_status = {k: bool(v) for k, v in results.items()}
+    print(f"[Analyzer] Data status for {symbol}: {data_status}")
     if not results.get("profile") or not results.get("income"):
-        raise ValueError(f"No data found for symbol: {symbol}")
+        missing = [k for k, v in data_status.items() if not v]
+        raise ValueError(f"No data found for symbol: {symbol}. Missing endpoints: {missing}. This may require an FMP Starter plan.")
 
     return results
 
