@@ -357,24 +357,41 @@ WHY HERE: [one sentence specific to this company using actual data]"""
         response = claude_complete(prompt, SYSTEM_PROMPT, max_tokens=2000)
         print(f"[Claude] Got response, length: {len(response)}")
 
-        # Parse sections
+        # Parse sections - robust parsing that handles Claude formatting variations
+        import re
         sections = {}
-        parts = response.split("===")
-        current = None
-        for part in parts:
-            part = part.strip()
-            if part in ["BUSINESS", "QUALITY", "VALUE", "VERDICT", "LEARNING"]:
-                current = part.lower()
-            elif current and part:
-                sections[current] = part.strip()
-                current = None
+
+        # Try splitting by === SECTION === pattern
+        section_pattern = re.compile(r'===\s*(BUSINESS|QUALITY|VALUE|VERDICT|LEARNING)\s*===', re.IGNORECASE)
+        matches = list(section_pattern.finditer(response))
+
+        if matches:
+            for i, match in enumerate(matches):
+                section_name = match.group(1).lower()
+                start = match.end()
+                end = matches[i+1].start() if i+1 < len(matches) else len(response)
+                sections[section_name] = response[start:end].strip()
+        else:
+            # Fallback: try splitting by just the section names on their own line
+            for name in ["BUSINESS", "QUALITY", "VALUE", "VERDICT", "LEARNING"]:
+                pattern = re.compile(r'(?:^|\n)\s*' + name + r'\s*\n(.*?)(?=\n\s*(?:BUSINESS|QUALITY|VALUE|VERDICT|LEARNING)\s*\n|$)', re.DOTALL | re.IGNORECASE)
+                m = pattern.search(response)
+                if m:
+                    sections[name.lower()] = m.group(1).strip()
+
+        print(f"[Claude] Parsed sections: {list(sections.keys())}")
+
+        # If still nothing parsed, use whole response as verdict
+        if not sections:
+            print(f"[Claude] Could not parse sections, using raw response")
+            sections["verdict"] = response
 
         # Map to expected keys
         result = {
             "business": sections.get("business", f"{profile['name']} operates in the {profile['sector']} sector."),
             "quality_narrative": sections.get("quality", "Quality analysis complete. See scores above."),
             "value_narrative": sections.get("value", "Valuation analysis complete. See scores above."),
-            "verdict": sections.get("verdict", "Please review the scores above for the full analysis."),
+            "verdict": sections.get("verdict", response if response else "Please review the scores above."),
             "learning": sections.get("learning", ""),
         }
 
