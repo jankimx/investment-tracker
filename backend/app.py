@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from functools import wraps
-import os, json, time, secrets, urllib.request, pytz, threading
+import os, json, time, base64, secrets, urllib.request, pytz, threading
 from datetime import datetime, timedelta
 
 load_dotenv()
@@ -37,12 +37,14 @@ AV_DAILY_LIMIT   = 25  # Alpha Vantage free tier
 # -- Database ----------------------------------------------
 client   = MongoClient(MONGO_URI)
 db       = client[DB_NAME]
-entries  = db["entries"]
-holdings = db["holdings"]
-txns     = db["transactions"]
+entries  = db["entries"]      # Legacy: per-day per-position snapshots (kept for backup; new code derives instead)
+holdings = db["holdings"]     # Legacy: cached current positions (kept for backup)
+txns     = db["transactions"] # Source of truth for buy/sell-tracked positions
+prices   = db["prices"]       # NEW: global per-symbol per-day close prices
+balances = db["balances"]     # NEW: source of truth for snapshot-tracked positions (401k etc.)
 meta     = db["meta"]
-analyses = db["analyses"]  # Stock analysis reports
-sessions = db["sessions"]  # Auth tokens
+analyses = db["analyses"]
+sessions = db["sessions"]
 
 # Create indexes once at startup
 try:
@@ -61,11 +63,120 @@ except Exception as e:
 for spec, coll, name in [
     ([("platform", 1), ("stock", 1)], holdings, "holdings_unique"),
     ([("date", 1), ("platform", 1), ("stock", 1)], entries, "entries_unique"),
+    ([("symbol", 1), ("date", 1)], prices,   "prices_unique"),
+    ([("platform", 1), ("stock", 1), ("date", 1)], balances, "balances_unique"),
 ]:
     try:
         coll.create_index(spec, unique=True, name=name)
     except Exception as e:
         print(f"[Startup] Could not create unique index {name} (likely existing duplicate data): {e}")
+
+# Non-unique indexes for common query paths
+try:
+    prices.create_index([("symbol", 1), ("date", DESCENDING)])
+    balances.create_index([("platform", 1), ("stock", 1), ("date", DESCENDING)])
+except Exception as e:
+    print(f"[Startup] secondary index warning: {e}")
+
+# -- One-time migration ------------------------------------
+def run_migration():
+    """Idempotent migration from the legacy entries/holdings model into the
+    new prices + transactions + balances model. Safe to call on every startup;
+    re-runs are cheap and no-op once everything is in place.
+
+    Steps:
+      1. Backfill `prices` from any auto-refreshed entries that have a price.
+         Keyed by (symbol, date) -- duplicates skip.
+      2. For every existing holding that has no matching transaction history,
+         synthesize an "initial position" buy at the recorded cost basis.
+      3. Mark migration progress in `meta` so we don't re-scan every boot.
+    """
+    state = meta.find_one({"key": "schema_migration_v2"}) or {}
+    if state.get("done"):
+        return
+
+    print("[Migration] Starting v2 schema migration")
+
+    # 1) Backfill prices from entries that have a numeric price field.
+    price_count = 0
+    for e in entries.find(
+        {"price": {"$exists": True, "$ne": None}, "stock": {"$exists": True}, "date": {"$exists": True}},
+        {"_id": 0, "stock": 1, "date": 1, "price": 1, "updated_at": 1},
+    ):
+        symbol = (e["stock"] or "").upper()
+        if not symbol:
+            continue
+        try:
+            prices.update_one(
+                {"symbol": symbol, "date": e["date"]},
+                {"$setOnInsert": {
+                    "symbol":     symbol,
+                    "date":       e["date"],
+                    "close":      float(e["price"]),
+                    "source":     "migrated_from_entries",
+                    "fetched_at": e.get("updated_at") or datetime.utcnow().isoformat(),
+                }},
+                upsert=True,
+            )
+            price_count += 1
+        except DuplicateKeyError:
+            pass
+        except Exception as ex:
+            print(f"[Migration] price upsert failed for {symbol} {e.get('date')}: {ex}")
+    print(f"[Migration] Backfilled {price_count} price rows")
+
+    # 2) Synthesize seed transactions for orphan holdings.
+    #    NEW model: shares is signed (positive = buy, negative = sell).
+    #    No `action` field on transactions.
+    seed_count = 0
+    for h in holdings.find():
+        platform = h.get("platform")
+        stock    = (h.get("stock") or "").upper()
+        shares   = float(h.get("shares", 0))
+        cb       = float(h.get("cost_basis", 0))
+        if not platform or not stock or shares <= 0:
+            continue
+        if txns.count_documents({"platform": platform, "stock": stock}, limit=1) > 0:
+            continue  # has real transaction history; leave alone
+        txns.insert_one({
+            "platform": platform, "stock": stock,
+            "shares": shares,  # positive = buy
+            "price_per_share": cb,
+            "date": (h.get("updated_at") or datetime.utcnow().isoformat())[:10],
+            "created_at": datetime.utcnow().isoformat(),
+            "synthetic": True,
+            "note": "Seeded by v2 migration from legacy holdings row",
+        })
+        seed_count += 1
+    print(f"[Migration] Seeded {seed_count} synthetic transactions for orphan holdings")
+
+    # 3) Convert legacy action=buy/sell transactions to signed shares.
+    flipped = 0
+    for t in txns.find({"action": {"$exists": True}}):
+        update = {"$unset": {"action": ""}}
+        cur_shares = float(t.get("shares", 0))
+        if t.get("action") == "sell" and cur_shares > 0:
+            update["$set"] = {"shares": -cur_shares}
+            flipped += 1
+        txns.update_one({"_id": t["_id"]}, update)
+    if flipped:
+        print(f"[Migration] Converted {flipped} 'sell' transactions to negative shares")
+    print("[Migration] Removed `action` field from legacy transactions")
+
+    meta.update_one(
+        {"key": "schema_migration_v2"},
+        {"$set": {"key": "schema_migration_v2", "done": True,
+                  "completed_at": datetime.utcnow().isoformat(),
+                  "prices_seeded": price_count, "txns_seeded": seed_count,
+                  "sells_flipped": flipped}},
+        upsert=True,
+    )
+    print("[Migration] v2 migration complete")
+
+try:
+    run_migration()
+except Exception as e:
+    print(f"[Migration] Failed (will retry next boot): {e}")
 
 # -- Helpers -----------------------------------------------
 def serialize(doc):
@@ -78,6 +189,27 @@ def safe_object_id(value):
         return ObjectId(value)
     except (InvalidId, TypeError):
         return None
+
+def position_id(platform, stock):
+    """URL-safe stable id for a (platform, stock) pair. Used so the existing
+    DELETE /holdings/<id> route can address a derived position even though
+    there's no longer a backing `holdings` document."""
+    raw = f"{platform}||{stock.upper()}"
+    return base64.urlsafe_b64encode(raw.encode()).decode().rstrip("=")
+
+def decode_position_id(pid):
+    """Inverse of position_id. Returns (platform, stock) or (None, None)."""
+    if not pid:
+        return None, None
+    pad = "=" * (-len(pid) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(pid + pad).decode()
+        platform, sep, stock = raw.partition("||")
+        if platform and sep and stock:
+            return platform, stock
+    except Exception:
+        pass
+    return None, None
 
 # -- Auth ---------------------------------------------------
 def issue_token():
@@ -135,81 +267,54 @@ def fetch_price(symbol):
         return None, None, str(e)
 
 def do_refresh():
-    """Fetch prices for all holdings and log entries. Returns result dict.
-
-    One Alpha Vantage call per DISTINCT ticker — the price is the same no matter
-    which broker holds it. After fetching, the price is written to every
-    (platform, stock) entry that uses that ticker.
-    """
-    all_holdings = list(holdings.find())
-    if not all_holdings:
-        return {"refreshed": 0, "errors": [], "date": datetime.utcnow().strftime("%Y-%m-%d")}
-
+    """Fetch today's close for every distinct symbol we track and upsert
+    into `prices`. Source of "what to fetch" is transactions + balances
+    (i.e. anything we currently hold). One AV call per distinct ticker."""
     today   = datetime.utcnow().strftime("%Y-%m-%d")
     results = []
     errors  = []
 
-    # Group holdings by uppercase ticker so the same stock across platforms
-    # only costs one API call.
-    by_symbol = {}
-    for h in all_holdings:
-        sym = h["stock"].upper()
-        by_symbol.setdefault(sym, []).append(h)
+    # Symbols we currently care about: every distinct stock from transactions
+    # and balances. Prioritize by current portfolio value so the AV daily cap
+    # cuts the lowest-impact tickers first.
+    positions    = derive_all_positions()
+    value_by_sym = {}
+    for p in positions:
+        sym = p["stock"].upper()
+        value_by_sym[sym] = value_by_sym.get(sym, 0) + (p.get("value") or 0)
+    if not value_by_sym:
+        return {"refreshed": 0, "errors": [], "date": today}
 
-    # Sort distinct symbols by total portfolio value (sum across all platforms
-    # that hold them) so the most valuable tickers are refreshed first if we
-    # hit the daily cap.
-    last_value = {
-        e["platform"] + "||" + e["stock"]: e.get("value", 0)
-        for e in latest_entries_per_position()
-    }
-    def symbol_total_value(sym):
-        return sum(last_value.get(h["platform"] + "||" + h["stock"], 0)
-                   for h in by_symbol[sym])
-    sorted_symbols = sorted(by_symbol.keys(), key=symbol_total_value, reverse=True)
+    sorted_symbols = sorted(value_by_sym.keys(), key=lambda s: value_by_sym[s], reverse=True)
 
-    # Cap at AV's daily limit by DISTINCT TICKERS. Holdings using a skipped
-    # ticker are reported as errors rather than silently failing.
     if len(sorted_symbols) > AV_DAILY_LIMIT:
         for sym in sorted_symbols[AV_DAILY_LIMIT:]:
-            for h in by_symbol[sym]:
-                errors.append({"stock": sym, "platform": h["platform"],
-                               "error": f"Skipped: exceeds Alpha Vantage daily limit ({AV_DAILY_LIMIT} tickers)"})
+            errors.append({"stock": sym,
+                           "error": f"Skipped: exceeds Alpha Vantage daily limit ({AV_DAILY_LIMIT} tickers)"})
         sorted_symbols = sorted_symbols[:AV_DAILY_LIMIT]
 
-    # Fetch one ticker at a time, then fan out to each (platform, stock) row.
     for i, symbol in enumerate(sorted_symbols):
         if i > 0:
             time.sleep(13)  # 13s gap = ~4.6 req/min, safely under AV's 5/min limit
 
-        price, prev_close, error = fetch_price(symbol)
-        print(f"[Refresh] {symbol}: price={price}, prev={prev_close}, err={error}")
+        price, _prev_close_unused, error = fetch_price(symbol)
+        print(f"[Refresh] {symbol}: price={price}, err={error}")
 
         if price is None:
-            for h in by_symbol[symbol]:
-                errors.append({"stock": symbol, "platform": h["platform"], "error": error})
+            errors.append({"stock": symbol, "error": error})
             continue
 
-        for h in by_symbol[symbol]:
-            shares     = float(h["shares"])
-            value      = round(price * shares, 2)
-            invested   = round(float(h.get("cost_basis", 0)) * shares, 2)
-            prev_value = round(prev_close * shares, 2) if prev_close else None
-            daily_gain = round(value - prev_value, 2) if prev_value else None
-            daily_pct  = round(daily_gain / prev_value * 100, 2) if (daily_gain is not None and prev_value) else None
-
-            entries.update_one(
-                {"date": today, "platform": h["platform"], "stock": h["stock"]},
-                {"$set": {
-                    "date": today, "platform": h["platform"], "stock": h["stock"],
-                    "value": value, "invested": invested, "shares": shares,
-                    "price": price, "prev_close": prev_close,
-                    "daily_gain": daily_gain, "daily_gain_pct": daily_pct,
-                    "auto_logged": True, "updated_at": datetime.utcnow().isoformat()
-                }},
-                upsert=True
-            )
-            results.append({"stock": symbol, "platform": h["platform"], "value": value, "daily_gain": daily_gain})
+        prices.update_one(
+            {"symbol": symbol, "date": today},
+            {"$set": {
+                "symbol": symbol, "date": today,
+                "close": float(price),
+                "source": "alpha_vantage",
+                "fetched_at": datetime.utcnow().isoformat(),
+            }},
+            upsert=True,
+        )
+        results.append({"stock": symbol, "close": price})
 
     # Store refresh metadata
     now_utc = datetime.utcnow()
@@ -313,15 +418,308 @@ def latest_entries_per_position(extra_match=None):
     ]
     return [r["latest"] for r in entries.aggregate(pipeline)]
 
-# -- Holdings ----------------------------------------------
+
+# -- Derivation helpers (new schema: prices + transactions + balances) --
+#
+# These functions compute the views the UI needs from the source-of-truth
+# tables, replacing the old cached `holdings` and `entries` collections.
+
+def get_latest_price(symbol):
+    """Latest close for a symbol, or None if no prices recorded."""
+    p = prices.find_one({"symbol": symbol.upper()}, sort=[("date", DESCENDING)])
+    return float(p["close"]) if p and p.get("close") is not None else None
+
+
+def get_price_on(symbol, date):
+    """Close price on the given YYYY-MM-DD, or the most recent prior date if
+    that exact day wasn't fetched. Used to value historical positions for the
+    chart -- handles weekends, holidays, and rate-limit gaps naturally."""
+    p = prices.find_one(
+        {"symbol": symbol.upper(), "date": {"$lte": date}},
+        sort=[("date", DESCENDING)],
+    )
+    return float(p["close"]) if p and p.get("close") is not None else None
+
+
+def get_prev_price(symbol, ref_date=None):
+    """Close from the trading day BEFORE ref_date (default: today). Used for
+    daily-gain math -- pairs with get_latest_price()."""
+    if ref_date is None:
+        ref_date = datetime.utcnow().strftime("%Y-%m-%d")
+    p = prices.find_one(
+        {"symbol": symbol.upper(), "date": {"$lt": ref_date}},
+        sort=[("date", DESCENDING)],
+    )
+    return (float(p["close"]) if p and p.get("close") is not None else None,
+            p["date"] if p else None)
+
+
+def compute_position_from_transactions(platform, stock):
+    """Walk the transaction history for (platform, stock) and return
+    (shares, cost_basis). `shares` on each transaction is signed: positive =
+    buy, negative = sell. Buys roll into a weighted-average cost basis; sells
+    subtract shares only (avg-cost convention)."""
+    history = list(txns.find(
+        {"platform": platform, "stock": stock.upper()}
+    ).sort("date", ASCENDING))
+    shares = 0.0
+    cost_basis = 0.0
+    for t in history:
+        s = float(t.get("shares", 0))
+        p = float(t.get("price_per_share", 0))
+        if s > 0:  # buy
+            new_shares = shares + s
+            cost_basis = ((shares * cost_basis) + (s * p)) / new_shares if new_shares > 0 else p
+            shares = new_shares
+        elif s < 0:  # sell
+            shares = max(0.0, shares + s)  # s is negative, so this subtracts
+            # cost basis unchanged on sells (avg-cost convention)
+    return shares, cost_basis
+
+
+def shares_as_of(platform, stock, date):
+    """Net shares held in (platform, stock) at end-of-day on `date`. For chart
+    series reconstruction. Uses signed shares -- just sum, clamp at 0."""
+    history = list(txns.find(
+        {"platform": platform, "stock": stock.upper(), "date": {"$lte": date}}
+    ).sort("date", ASCENDING))
+    shares = 0.0
+    for t in history:
+        shares += float(t.get("shares", 0))
+    return max(0.0, shares)
+
+
+def derive_all_positions():
+    """Return a list of dicts describing every currently-held position,
+    pulled from transactions OR balances depending on which source the
+    (platform, stock) is tracked under.
+
+    Schema returned per position:
+      platform, stock, shares, cost_basis,
+      source ("transactions" | "balance"),
+      price (current close),
+      value (shares * price),
+      invested (shares * cost_basis),
+      daily_gain, daily_gain_pct,
+      prev_close,
+    """
+    positions = []
+    txn_keys  = set()
+
+    # Transaction-tracked positions
+    for r in txns.aggregate([
+        {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
+    ]):
+        platform = r["_id"]["platform"]
+        stock    = r["_id"]["stock"]
+        shares, cb = compute_position_from_transactions(platform, stock)
+        if shares <= 0:
+            continue
+        txn_keys.add((platform, stock))
+        positions.append({
+            "platform": platform, "stock": stock,
+            "shares": round(shares, 6), "cost_basis": round(cb, 4),
+            "source": "transactions",
+        })
+
+    # Balance-tracked positions (latest balance per (platform, stock))
+    for r in balances.aggregate([
+        {"$sort":  {"date": DESCENDING}},
+        {"$group": {"_id": {"platform": "$platform", "stock": "$stock"},
+                    "latest": {"$first": "$$ROOT"}}},
+    ]):
+        b = r["latest"]
+        platform = b["platform"]
+        stock    = b["stock"]
+        if (platform, stock) in txn_keys:
+            # A position has transactions -- those win, ignore the balance row.
+            continue
+        shares = float(b.get("shares", 0))
+        if shares <= 0:
+            continue
+        positions.append({
+            "platform": platform, "stock": stock,
+            "shares": round(shares, 6),
+            "cost_basis": round(float(b.get("cost_basis", 0)), 4),
+            "source": "balance",
+            "user_reported_value": b.get("value"),
+        })
+
+    # Enrich with current price + value + daily gain
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    for pos in positions:
+        sym = pos["stock"].upper()
+        price = get_latest_price(sym)
+        prev, prev_date = get_prev_price(sym, ref_date=today)
+        shares = pos["shares"]
+        cb     = pos["cost_basis"]
+
+        if price is not None:
+            pos["price"]    = round(price, 4)
+            pos["value"]    = round(price * shares, 2)
+            pos["invested"] = round(cb * shares, 2)
+        else:
+            # No price -- fall back to user-reported value for balance positions
+            pos["price"]    = None
+            pos["value"]    = (round(float(pos.get("user_reported_value") or 0), 2)
+                               if pos.get("source") == "balance" else None)
+            pos["invested"] = round(cb * shares, 2)
+
+        if price is not None and prev is not None:
+            pos["prev_close"]     = round(prev, 4)
+            pos["daily_gain"]     = round((price - prev) * shares, 2)
+            pos["daily_gain_pct"] = round((price - prev) / prev * 100, 2) if prev > 0 else None
+        else:
+            pos["prev_close"]     = None
+            pos["daily_gain"]     = None
+            pos["daily_gain_pct"] = None
+        pos.pop("user_reported_value", None)
+
+    return positions
+
+
+def backfill_prices_from_fmp(symbol, since_date):
+    """Pull daily close bars for `symbol` from FMP starting at `since_date`
+    and upsert into prices. Idempotent -- existing (symbol, date) rows are
+    not overwritten. Returns the number of new rows inserted, or 0 if no key
+    is configured."""
+    if not FMP_KEY:
+        return 0
+    symbol = symbol.upper()
+    try:
+        url = (f"https://financialmodelingprep.com/stable/historical-price-eod/light"
+               f"?symbol={symbol}&from={since_date}&apikey={FMP_KEY}")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode())
+    except Exception as ex:
+        print(f"[FMP backfill] {symbol} since={since_date}: {ex}")
+        return 0
+
+    # FMP returns either a list of {date, price/close, volume} or {historical: [...]}
+    rows = data if isinstance(data, list) else (data.get("historical") or [])
+    inserted = 0
+    for row in rows:
+        date  = row.get("date")
+        close = row.get("price") or row.get("close") or row.get("adjClose")
+        if not date or close is None:
+            continue
+        try:
+            prices.update_one(
+                {"symbol": symbol, "date": date},
+                {"$setOnInsert": {
+                    "symbol":     symbol,
+                    "date":       date,
+                    "close":      float(close),
+                    "source":     "fmp_historical",
+                    "fetched_at": datetime.utcnow().isoformat(),
+                }},
+                upsert=True,
+            )
+            inserted += 1
+        except DuplicateKeyError:
+            pass
+        except Exception as ex:
+            print(f"[FMP backfill] upsert failed for {symbol} {date}: {ex}")
+    print(f"[FMP backfill] {symbol}: fetched {inserted} rows since {since_date}")
+    return inserted
+
+
+def ensure_price_history_covers(symbol, since_date):
+    """If our earliest prices row for `symbol` is later than `since_date`,
+    fetch FMP historical bars back to that date. No-op if coverage already
+    extends to (or before) since_date."""
+    earliest = prices.find_one({"symbol": symbol.upper()}, sort=[("date", ASCENDING)])
+    if earliest and earliest.get("date", "9999-99-99") <= since_date:
+        return
+    backfill_prices_from_fmp(symbol, since_date)
+
+
+def derive_chart_series(since_date, platform_filter=None):
+    """Return slim {date, platform, stock, value} rows over a date window,
+    suitable for the dashboard chart. Reconstructs historical position values
+    from transactions (current shares as of each date) × prices (close on that
+    date) plus balances (most recent snapshot ≤ each date)."""
+
+    # Collect every (platform, stock) we've ever transacted in, plus every
+    # balance-tracked position.
+    keys = set()
+    for r in txns.aggregate([
+        {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
+    ]):
+        keys.add((r["_id"]["platform"], r["_id"]["stock"]))
+    for r in balances.aggregate([
+        {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
+    ]):
+        keys.add((r["_id"]["platform"], r["_id"]["stock"]))
+
+    if not keys:
+        return []
+
+    # Build dates: every distinct prices date >= since_date. (Skips weekends
+    # and holidays naturally because we only have rows for trading days.)
+    distinct_dates = sorted(prices.distinct("date", {"date": {"$gte": since_date}}))
+    if not distinct_dates:
+        return []
+
+    out = []
+    txn_keys = {(p, s) for (p, s) in keys}
+    for platform, stock in sorted(keys):
+        if platform_filter and platform != platform_filter:
+            continue
+        sym = stock.upper()
+        is_balance = txns.count_documents({"platform": platform, "stock": stock}, limit=1) == 0
+        for d in distinct_dates:
+            if is_balance:
+                b = balances.find_one(
+                    {"platform": platform, "stock": stock, "date": {"$lte": d}},
+                    sort=[("date", DESCENDING)],
+                )
+                if not b:
+                    continue
+                shares = float(b.get("shares", 0))
+            else:
+                shares = shares_as_of(platform, stock, d)
+            if shares <= 0:
+                continue
+            price = get_price_on(sym, d)
+            if price is None:
+                continue
+            out.append({
+                "date":     d,
+                "platform": platform,
+                "stock":    stock,
+                "value":    round(price * shares, 2),
+            })
+    return out
+
+
+# -- Holdings (derived) ------------------------------------
+# `holdings` is no longer a stored collection -- it's a view over transactions
+# and balances. GET returns derived positions; POST writes a transaction (or
+# balance); DELETE wipes all records for a (platform, stock) pair.
+
 @app.route("/holdings", methods=["GET"])
 @require_auth
 def get_holdings():
-    return jsonify([serialize(h) for h in holdings.find()])
+    rows = []
+    for p in derive_all_positions():
+        rows.append({
+            "id":         position_id(p["platform"], p["stock"]),
+            "platform":   p["platform"],
+            "stock":      p["stock"],
+            "shares":     p["shares"],
+            "cost_basis": p["cost_basis"],
+            "source":     p["source"],
+        })
+    return jsonify(rows)
 
 @app.route("/holdings", methods=["POST"])
 @require_auth
 def upsert_holding():
+    """Convenience endpoint: 'I have X shares of Y at cost basis Z'.
+    Writes a synthetic 'buy' transaction (or a balance if explicitly asked).
+    """
     d = request.get_json() or {}
     for f in ["platform", "stock", "shares"]:
         if f not in d:
@@ -330,40 +728,42 @@ def upsert_holding():
     stock      = d["stock"].upper()
     shares     = float(d["shares"])
     cost_basis = float(d.get("cost_basis", 0))
-    now_iso    = datetime.utcnow().isoformat()
+    if shares <= 0:
+        return jsonify({"error": "shares must be positive"}), 400
 
-    # If this is a brand-new position (no transactions logged yet), drop a
-    # synthetic "initial position" buy so the transaction log stays complete.
-    # If transactions already exist, the user is correcting an existing
-    # holding -- leave the log alone.
-    has_history = txns.count_documents({"platform": platform, "stock": stock}, limit=1) > 0
-    if shares > 0 and not has_history:
-        txns.insert_one({
-            "platform": platform, "stock": stock, "action": "buy",
-            "shares": shares, "price_per_share": cost_basis,
-            "date": datetime.utcnow().strftime("%Y-%m-%d"),
-            "created_at": now_iso,
-            "synthetic": True,
-            "note": "Initial position seeded from holdings upsert",
-        })
+    # If there's no existing transaction history, seed it with a synthetic
+    # 'buy'. Otherwise the user is asking us to overwrite an existing
+    # position, which we no longer support directly -- they should use
+    # /transactions or /balances explicitly.
+    has_history  = txns.count_documents({"platform": platform, "stock": stock}, limit=1) > 0
+    has_balance  = balances.count_documents({"platform": platform, "stock": stock}, limit=1) > 0
+    if has_history or has_balance:
+        return jsonify({
+            "error": "Position already exists; use /transactions or /balances to update it"
+        }), 409
 
-    holdings.update_one(
-        {"platform": platform, "stock": stock},
-        {"$set": {"platform": platform, "stock": stock,
-                  "shares": shares, "cost_basis": cost_basis,
-                  "updated_at": now_iso}},
-        upsert=True
-    )
+    txns.insert_one({
+        "platform": platform, "stock": stock, "action": "buy",
+        "shares": shares, "price_per_share": cost_basis,
+        "date": datetime.utcnow().strftime("%Y-%m-%d"),
+        "created_at": datetime.utcnow().isoformat(),
+        "synthetic": True,
+        "note": "Initial position seeded from /holdings upsert",
+    })
     return jsonify({"ok": True}), 201
 
 @app.route("/holdings/<hid>", methods=["DELETE"])
 @require_auth
 def delete_holding(hid):
-    oid = safe_object_id(hid)
-    if oid is None:
+    """Remove a position entirely: wipe its transaction log AND any balance
+    snapshots. Permanent -- the Frontend's confirm dialog should make this
+    clear."""
+    platform, stock = decode_position_id(hid)
+    if not platform:
         return jsonify({"error": "Invalid id"}), 400
-    holdings.delete_one({"_id": oid})
-    return jsonify({"ok": True})
+    t_del = txns.delete_many({"platform": platform, "stock": stock}).deleted_count
+    b_del = balances.delete_many({"platform": platform, "stock": stock}).deleted_count
+    return jsonify({"ok": True, "transactions_deleted": t_del, "balances_deleted": b_del})
 
 # -- Transactions ------------------------------------------
 @app.route("/transactions", methods=["GET"])
@@ -374,60 +774,50 @@ def get_transactions():
     if request.args.get("stock"):    q["stock"]    = request.args["stock"]
     return jsonify([serialize(t) for t in txns.find(q).sort("date", DESCENDING)])
 
-def recompute_holding(platform, stock):
-    """Rebuild holdings.shares + cost_basis for (platform, stock) from the full
-    transaction history. Buys add shares and roll into a weighted average cost
-    basis; sells subtract shares and leave cost basis untouched. If no
-    transactions remain, the holding is removed entirely."""
-    history = list(txns.find(
-        {"platform": platform, "stock": stock}
-    ).sort("date", ASCENDING))
-
-    if not history:
-        holdings.delete_one({"platform": platform, "stock": stock})
-        return
-
-    shares = 0.0
-    cost_basis = 0.0
-    for t in history:
-        s = float(t.get("shares", 0))
-        p = float(t.get("price_per_share", 0))
-        if t.get("action") == "buy":
-            new_shares = shares + s
-            cost_basis = ((shares * cost_basis) + (s * p)) / new_shares if new_shares > 0 else p
-            shares = new_shares
-        else:  # sell
-            shares = max(0.0, shares - s)
-            # cost basis unchanged on sells (avg-cost convention)
-
-    holdings.update_one(
-        {"platform": platform, "stock": stock},
-        {"$set": {"platform": platform, "stock": stock,
-                  "shares": round(shares, 6),
-                  "cost_basis": round(cost_basis, 4),
-                  "updated_at": datetime.utcnow().isoformat()}},
-        upsert=True
-    )
-
 @app.route("/transactions", methods=["POST"])
 @require_auth
 def add_transaction():
+    """Accepts either:
+      { platform, stock, shares (signed), price_per_share, date? }    -- new
+      { platform, stock, action: "buy"|"sell", shares (positive), ... } -- legacy
+    Stores only signed shares; no `action` field."""
     d = request.get_json() or {}
-    for f in ["platform", "stock", "action", "shares", "price_per_share"]:
+    for f in ["platform", "stock", "shares", "price_per_share"]:
         if f not in d:
             return jsonify({"error": f"Missing: {f}"}), 400
 
     platform = d["platform"]
     stock    = d["stock"].upper()
-    action   = d["action"]
     shares   = float(d["shares"])
     pps      = float(d["price_per_share"])
     date     = d.get("date", datetime.utcnow().strftime("%Y-%m-%d"))
 
-    txns.insert_one({"platform": platform, "stock": stock, "action": action,
-                     "shares": shares, "price_per_share": pps, "date": date,
-                     "created_at": datetime.utcnow().isoformat()})
-    recompute_holding(platform, stock)
+    # Legacy compat: if an action field was sent alongside positive shares,
+    # apply the sign.
+    action = d.get("action")
+    if action == "sell" and shares > 0:
+        shares = -shares
+    elif action == "buy" and shares < 0:
+        shares = abs(shares)
+
+    if shares == 0:
+        return jsonify({"error": "shares must be non-zero"}), 400
+
+    txns.insert_one({
+        "platform": platform, "stock": stock,
+        "shares": shares,
+        "price_per_share": pps,
+        "date": date,
+        "created_at": datetime.utcnow().isoformat(),
+    })
+
+    # If this transaction is dated before our earliest price for the symbol,
+    # backfill historical bars from FMP so the chart can render from that date.
+    try:
+        ensure_price_history_covers(stock, date)
+    except Exception as ex:
+        print(f"[Transactions] backfill failed for {stock} since {date}: {ex}")
+
     return jsonify({"ok": True}), 201
 
 @app.route("/transactions/<tid>", methods=["DELETE"])
@@ -436,13 +826,67 @@ def delete_transaction(tid):
     oid = safe_object_id(tid)
     if oid is None:
         return jsonify({"error": "Invalid id"}), 400
-    # Capture the position the transaction was attached to BEFORE deleting,
-    # so we know which holding to recompute afterwards.
-    t = txns.find_one({"_id": oid})
-    if not t:
-        return jsonify({"ok": True})  # already gone
     txns.delete_one({"_id": oid})
-    recompute_holding(t["platform"], t["stock"])
+    return jsonify({"ok": True})
+
+# -- Balances ----------------------------------------------
+# For snapshot-tracked positions (401k, HSA, target-date funds...) where you
+# only have periodic statements rather than per-trade data.
+@app.route("/balances", methods=["GET"])
+@require_auth
+def get_balances():
+    q = {}
+    if request.args.get("platform"): q["platform"] = request.args["platform"]
+    if request.args.get("stock"):    q["stock"]    = request.args["stock"].upper()
+    return jsonify([serialize(b) for b in balances.find(q).sort("date", DESCENDING)])
+
+@app.route("/balances", methods=["POST"])
+@require_auth
+def add_balance():
+    d = request.get_json() or {}
+    for f in ["platform", "stock", "date", "shares"]:
+        if f not in d:
+            return jsonify({"error": f"Missing: {f}"}), 400
+    platform   = d["platform"]
+    stock      = d["stock"].upper()
+    date       = d["date"]
+    shares     = float(d["shares"])
+    cost_basis = float(d.get("cost_basis", 0))
+    value      = float(d["value"]) if d.get("value") not in (None, "") else None
+    note       = d.get("note", "")
+
+    # If this position has any transaction history, it's a buy/sell-tracked
+    # position; balances would conflict. Block the write rather than silently
+    # ignore it on read.
+    if txns.count_documents({"platform": platform, "stock": stock}, limit=1) > 0:
+        return jsonify({"error": "This position is transaction-tracked; use /transactions instead"}), 409
+
+    balances.update_one(
+        {"platform": platform, "stock": stock, "date": date},
+        {"$set": {
+            "platform": platform, "stock": stock, "date": date,
+            "shares": shares, "cost_basis": cost_basis,
+            "value": value, "note": note,
+            "created_at": datetime.utcnow().isoformat(),
+        }},
+        upsert=True,
+    )
+
+    # Backfill historical prices if this snapshot is older than what we have.
+    try:
+        ensure_price_history_covers(stock, date)
+    except Exception as ex:
+        print(f"[Balances] backfill failed for {stock} since {date}: {ex}")
+
+    return jsonify({"ok": True}), 201
+
+@app.route("/balances/<bid>", methods=["DELETE"])
+@require_auth
+def delete_balance(bid):
+    oid = safe_object_id(bid)
+    if oid is None:
+        return jsonify({"error": "Invalid id"}), 400
+    balances.delete_one({"_id": oid})
     return jsonify({"ok": True})
 
 # -- Entries -----------------------------------------------
@@ -477,10 +921,25 @@ def get_entries():
 @app.route("/positions", methods=["GET"])
 @require_auth
 def get_positions():
-    """Latest entry per (platform, stock). The dashboard's positions table
-    needs exactly this; previously it was re-derived client-side from the
-    full /entries dump."""
-    return jsonify([serialize(e) for e in latest_entries_per_position()])
+    """All currently-held positions, fully enriched with current price,
+    value, daily gain. Source-of-truth is transactions + balances + prices."""
+    out = []
+    for p in derive_all_positions():
+        out.append({
+            "id":             position_id(p["platform"], p["stock"]),
+            "platform":       p["platform"],
+            "stock":          p["stock"],
+            "shares":         p["shares"],
+            "cost_basis":     p["cost_basis"],
+            "invested":       p.get("invested"),
+            "price":          p.get("price"),
+            "prev_close":     p.get("prev_close"),
+            "value":          p.get("value"),
+            "daily_gain":     p.get("daily_gain"),
+            "daily_gain_pct": p.get("daily_gain_pct"),
+            "source":         p.get("source"),
+        })
+    return jsonify(out)
 
 CHART_DEFAULT_DAYS = 90
 CHART_MAX_DAYS     = 730
@@ -488,9 +947,9 @@ CHART_MAX_DAYS     = 730
 @app.route("/chart-data", methods=["GET"])
 @require_auth
 def get_chart_data():
-    """Slim time series for the dashboard chart. Returns only the fields the
-    chart actually consumes (date, platform, stock, value), filtered by
-    a sliding window so we don't ship years of history on page load."""
+    """Slim time series for the dashboard chart, derived from
+    transactions + balances × prices. Returns one row per
+    (date, platform, stock) over the requested window."""
     try:
         days = int(request.args.get("days", CHART_DEFAULT_DAYS))
     except ValueError:
@@ -498,11 +957,8 @@ def get_chart_data():
     days = max(1, min(days, CHART_MAX_DAYS))
 
     since = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
-    cursor = entries.find(
-        {"date": {"$gte": since}},
-        {"_id": 0, "date": 1, "platform": 1, "stock": 1, "value": 1},
-    ).sort("date", ASCENDING)
-    return jsonify({"since": since, "days": days, "rows": list(cursor)})
+    rows  = derive_chart_series(since)
+    return jsonify({"since": since, "days": days, "rows": rows})
 
 @app.route("/entries", methods=["POST"])
 @require_auth
@@ -531,24 +987,22 @@ def delete_entry(eid):
 @app.route("/summary", methods=["GET"])
 @require_auth
 def get_summary():
-    latest = latest_entries_per_position()
+    positions = derive_all_positions()
 
-    total_value    = sum(e["value"] for e in latest)
-    total_invested = sum(e.get("invested", 0) for e in latest)
+    total_value    = sum((p.get("value") or 0) for p in positions)
+    total_invested = sum((p.get("invested") or 0) for p in positions)
 
-    # Daily gain: sum stored daily_gain from latest entries (vs prev close).
-    # Denominator MUST exclude positions that lack a prev_close so we don't
-    # divide by a partial total.
-    contributing  = [e for e in latest if e.get("daily_gain") is not None]
-    daily_gain    = round(sum(e["daily_gain"] for e in contributing), 2) if contributing else None
-    prev_subtotal = sum(e["value"] - e["daily_gain"] for e in contributing)
+    contributing  = [p for p in positions if p.get("daily_gain") is not None]
+    daily_gain    = round(sum(p["daily_gain"] for p in contributing), 2) if contributing else None
+    prev_subtotal = sum((p.get("value") or 0) - (p.get("daily_gain") or 0) for p in contributing)
     daily_pct     = (round(daily_gain / prev_subtotal * 100, 2)
                      if (daily_gain is not None and prev_subtotal > 0) else None)
 
     platforms, stocks = {}, {}
-    for e in latest:
-        platforms[e["platform"]] = round(platforms.get(e["platform"], 0) + e["value"], 2)
-        stocks[e["stock"]]       = round(stocks.get(e["stock"], 0) + e["value"], 2)
+    for p in positions:
+        v = p.get("value") or 0
+        platforms[p["platform"]] = round(platforms.get(p["platform"], 0) + v, 2)
+        stocks[p["stock"]]       = round(stocks.get(p["stock"], 0) + v, 2)
 
     return jsonify({
         "total_value":      round(total_value, 2),
@@ -559,18 +1013,22 @@ def get_summary():
         "daily_gain_basis": round(prev_subtotal, 2) if contributing else None,
         "platforms":        platforms,
         "stocks":           stocks,
-        "entry_count":      entries.estimated_document_count(),
+        "position_count":   len(positions),
     })
 
 @app.route("/platforms", methods=["GET"])
 @require_auth
 def get_platforms():
-    return jsonify(sorted(entries.distinct("platform")))
+    s = set(txns.distinct("platform"))
+    s.update(balances.distinct("platform"))
+    return jsonify(sorted(p for p in s if p))
 
 @app.route("/stocks", methods=["GET"])
 @require_auth
 def get_stocks():
-    return jsonify(sorted(entries.distinct("stock")))
+    s = set(t.upper() for t in txns.distinct("stock") if t)
+    s.update(b.upper() for b in balances.distinct("stock") if b)
+    return jsonify(sorted(s))
 
 # -- Refresh -----------------------------------------------
 _refresh_lock = threading.Lock()  # in-process guard against double-clicks
