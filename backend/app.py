@@ -124,7 +124,12 @@ def fetch_price(symbol):
         return None, None, str(e)
 
 def do_refresh():
-    """Fetch prices for all holdings and log entries. Returns result dict."""
+    """Fetch prices for all holdings and log entries. Returns result dict.
+
+    One Alpha Vantage call per DISTINCT ticker — the price is the same no matter
+    which broker holds it. After fetching, the price is written to every
+    (platform, stock) entry that uses that ticker.
+    """
     all_holdings = list(holdings.find())
     if not all_holdings:
         return {"refreshed": 0, "errors": [], "date": datetime.utcnow().strftime("%Y-%m-%d")}
@@ -133,58 +138,67 @@ def do_refresh():
     results = []
     errors  = []
 
-    # Sort by last known value descending so the most valuable positions are
-    # refreshed first if we hit the API daily cap. One aggregation, not a full scan.
+    # Group holdings by uppercase ticker so the same stock across platforms
+    # only costs one API call.
+    by_symbol = {}
+    for h in all_holdings:
+        sym = h["stock"].upper()
+        by_symbol.setdefault(sym, []).append(h)
+
+    # Sort distinct symbols by total portfolio value (sum across all platforms
+    # that hold them) so the most valuable tickers are refreshed first if we
+    # hit the daily cap.
     last_value = {
         e["platform"] + "||" + e["stock"]: e.get("value", 0)
         for e in latest_entries_per_position()
     }
-    sorted_holdings = sorted(
-        all_holdings,
-        key=lambda h: last_value.get(h["platform"] + "||" + h["stock"], 0),
-        reverse=True
-    )
+    def symbol_total_value(sym):
+        return sum(last_value.get(h["platform"] + "||" + h["stock"], 0)
+                   for h in by_symbol[sym])
+    sorted_symbols = sorted(by_symbol.keys(), key=symbol_total_value, reverse=True)
 
-    # Cap at AV's daily limit. Anything past the cap is reported as an error
-    # rather than silently swallowed by Alpha Vantage's rate-limit response.
-    if len(sorted_holdings) > AV_DAILY_LIMIT:
-        for h in sorted_holdings[AV_DAILY_LIMIT:]:
-            errors.append({"stock": h["stock"], "platform": h["platform"],
-                           "error": f"Skipped: exceeds Alpha Vantage daily limit ({AV_DAILY_LIMIT})"})
-        sorted_holdings = sorted_holdings[:AV_DAILY_LIMIT]
+    # Cap at AV's daily limit by DISTINCT TICKERS. Holdings using a skipped
+    # ticker are reported as errors rather than silently failing.
+    if len(sorted_symbols) > AV_DAILY_LIMIT:
+        for sym in sorted_symbols[AV_DAILY_LIMIT:]:
+            for h in by_symbol[sym]:
+                errors.append({"stock": sym, "platform": h["platform"],
+                               "error": f"Skipped: exceeds Alpha Vantage daily limit ({AV_DAILY_LIMIT} tickers)"})
+        sorted_symbols = sorted_symbols[:AV_DAILY_LIMIT]
 
-    # Fetch one at a time with delay to respect AV's 5 req/min limit
-    for i, h in enumerate(sorted_holdings):
-        symbol = h["stock"].upper()
+    # Fetch one ticker at a time, then fan out to each (platform, stock) row.
+    for i, symbol in enumerate(sorted_symbols):
         if i > 0:
-            time.sleep(13)  # 13s gap = ~4.6 req/min, safely under 5/min limit
+            time.sleep(13)  # 13s gap = ~4.6 req/min, safely under AV's 5/min limit
 
         price, prev_close, error = fetch_price(symbol)
         print(f"[Refresh] {symbol}: price={price}, prev={prev_close}, err={error}")
 
         if price is None:
-            errors.append({"stock": symbol, "platform": h["platform"], "error": error})
+            for h in by_symbol[symbol]:
+                errors.append({"stock": symbol, "platform": h["platform"], "error": error})
             continue
 
-        shares     = float(h["shares"])
-        value      = round(price * shares, 2)
-        invested   = round(float(h.get("cost_basis", 0)) * shares, 2)
-        prev_value = round(prev_close * shares, 2) if prev_close else None
-        daily_gain = round(value - prev_value, 2) if prev_value else None
-        daily_pct  = round(daily_gain / prev_value * 100, 2) if (daily_gain is not None and prev_value) else None
+        for h in by_symbol[symbol]:
+            shares     = float(h["shares"])
+            value      = round(price * shares, 2)
+            invested   = round(float(h.get("cost_basis", 0)) * shares, 2)
+            prev_value = round(prev_close * shares, 2) if prev_close else None
+            daily_gain = round(value - prev_value, 2) if prev_value else None
+            daily_pct  = round(daily_gain / prev_value * 100, 2) if (daily_gain is not None and prev_value) else None
 
-        entries.update_one(
-            {"date": today, "platform": h["platform"], "stock": h["stock"]},
-            {"$set": {
-                "date": today, "platform": h["platform"], "stock": h["stock"],
-                "value": value, "invested": invested, "shares": shares,
-                "price": price, "prev_close": prev_close,
-                "daily_gain": daily_gain, "daily_gain_pct": daily_pct,
-                "auto_logged": True, "updated_at": datetime.utcnow().isoformat()
-            }},
-            upsert=True
-        )
-        results.append({"stock": symbol, "platform": h["platform"], "value": value, "daily_gain": daily_gain})
+            entries.update_one(
+                {"date": today, "platform": h["platform"], "stock": h["stock"]},
+                {"$set": {
+                    "date": today, "platform": h["platform"], "stock": h["stock"],
+                    "value": value, "invested": invested, "shares": shares,
+                    "price": price, "prev_close": prev_close,
+                    "daily_gain": daily_gain, "daily_gain_pct": daily_pct,
+                    "auto_logged": True, "updated_at": datetime.utcnow().isoformat()
+                }},
+                upsert=True
+            )
+            results.append({"stock": symbol, "platform": h["platform"], "value": value, "daily_gain": daily_gain})
 
     # Store refresh metadata
     now_utc = datetime.utcnow()

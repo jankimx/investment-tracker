@@ -226,10 +226,20 @@ async function fetchRefreshStatus() {
 function updateRefreshInfo() {
   const el = document.getElementById('refresh-info');
   if (!el) return;
-  const count = state.holdings.length;
+  // One API call per DISTINCT ticker, not per holdings row -- the same stock
+  // on multiple platforms only costs one call.
+  const tickers = new Set(state.holdings.map(h => (h.stock || '').toUpperCase()));
+  const count = tickers.size;
   if (!count) { el.textContent = ''; return; }
   const times = Math.floor(25 / count);
-  el.innerHTML = `Each refresh uses <strong style="color:var(--text)">${count}</strong> of 25 daily API calls &mdash; ~${times}x per day`;
+
+  el.replaceChildren();
+  el.appendChild(document.createTextNode('Each refresh uses '));
+  const num = document.createElement('strong');
+  num.style.color = 'var(--text)';
+  num.textContent = String(count);
+  el.appendChild(num);
+  el.appendChild(document.createTextNode(` of 25 daily API calls — ~${times}x per day`));
 }
 
 // -- Dashboard ---------------------------------------------
