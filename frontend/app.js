@@ -873,15 +873,65 @@ async function runAnalysis() {
   if (area) {
     area.innerHTML = '';
     const wrap = document.createElement('div');
-    wrap.style.cssText = 'text-align:center;padding:60px 0';
+    wrap.style.cssText = 'max-width:360px;margin:60px auto;padding:0 16px';
+
     const spinner = document.createElement('div');
-    spinner.style.cssText = 'width:28px;height:28px;margin:0 auto 14px;border:2px solid var(--border2);border-top-color:var(--green);border-radius:50%;animation:spin 0.8s linear infinite';
-    const msg = el('div', 'Fetching data and generating analysis...', 'font-size:12px;color:var(--text3)');
-    const msg2 = el('div', 'This takes about 30-60 seconds', 'font-size:11px;color:var(--text3);margin-top:6px');
+    spinner.style.cssText = 'width:28px;height:28px;margin:0 auto 20px;border:2px solid var(--border2);border-top-color:var(--green);border-radius:50%;animation:spin 0.8s linear infinite';
     wrap.appendChild(spinner);
-    wrap.appendChild(msg);
-    wrap.appendChild(msg2);
+
+    const steps = [
+      { id: 's1', label: 'Fetching financial data from FMP...' },
+      { id: 's2', label: 'Calculating quality score...' },
+      { id: 's3', label: 'Calculating value score...' },
+      { id: 's4', label: 'Checking for red flags...' },
+      { id: 's5', label: 'Generating analysis with Claude AI...' },
+      { id: 's6', label: 'Building your report...' },
+    ];
+
+    steps.forEach(function(s, i) {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--border)';
+      row.id = s.id;
+
+      const dot = document.createElement('div');
+      dot.style.cssText = 'width:8px;height:8px;border-radius:50%;background:var(--border2);flex-shrink:0;transition:background 0.3s';
+      dot.id = s.id + '-dot';
+
+      const label = el('div', s.label, 'font-size:12px;color:var(--text3);transition:color 0.3s');
+      label.id = s.id + '-label';
+
+      row.appendChild(dot);
+      row.appendChild(label);
+      wrap.appendChild(row);
+    });
+
+    const note = el('div', 'This typically takes 30-60 seconds', 'font-size:11px;color:var(--text3);margin-top:16px;text-align:center');
+    wrap.appendChild(note);
     area.appendChild(wrap);
+
+    // Animate steps
+    let currentStep = 0;
+    const stepTimes = [0, 3000, 5000, 7000, 10000, 45000];
+    function activateStep(i) {
+      // Mark previous as done
+      if (i > 0) {
+        const prevDot = document.getElementById(steps[i-1].id + '-dot');
+        const prevLabel = document.getElementById(steps[i-1].id + '-label');
+        if (prevDot) prevDot.style.background = 'var(--green)';
+        if (prevLabel) prevLabel.style.color = 'var(--green)';
+      }
+      // Activate current
+      if (i < steps.length) {
+        const dot = document.getElementById(steps[i].id + '-dot');
+        const label = document.getElementById(steps[i].id + '-label');
+        if (dot) dot.style.background = 'var(--yellow)';
+        if (label) label.style.color = 'var(--text)';
+        if (i + 1 < steps.length) {
+          setTimeout(function() { activateStep(i + 1); }, stepTimes[i + 1] - stepTimes[i]);
+        }
+      }
+    }
+    activateStep(0);
   }
 
   try {
