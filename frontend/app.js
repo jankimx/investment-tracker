@@ -828,7 +828,7 @@ function initAnalyzeTab() {
 
 async function loadRecentAnalyses() {
   try {
-    const recent = await apiFetch('/recent-analyses');
+    const recent = await api('/recent-analyses');
     if (!recent || !recent.length) return;
     const wrap = document.getElementById('analyze-recent-wrap');
     const grid = document.getElementById('analyze-recent-grid');
@@ -885,7 +885,7 @@ async function runAnalysis() {
   }
 
   try {
-    const result = await apiFetch('/analyze/' + symbol);
+    const result = await api('/analyze/' + symbol);
     renderAnalysisReport(result);
     loadRecentAnalyses();
   } catch(e) {
@@ -1317,7 +1317,7 @@ async function submitAnalyzeQuestion(symbol, inputEl, answerEl) {
   if (!question) return;
   if (answerEl) { answerEl.style.display = 'block'; answerEl.textContent = 'Thinking...'; }
   try {
-    const res = await apiFetch('/analyze/' + symbol + '/question', {
+    const res = await api('/analyze/' + symbol + '/question', {
       method: 'POST',
       body: JSON.stringify({ question: question })
     });
@@ -1334,7 +1334,7 @@ async function refreshAnalysis(symbol) {
     area.appendChild(el('div', 'Refreshing analysis...', 'text-align:center;padding:40px;color:var(--text3)'));
   }
   try {
-    const result = await apiFetch('/analyze/' + symbol + '?refresh=true');
+    const result = await api('/analyze/' + symbol + '?refresh=true');
     renderAnalysisReport(result);
   } catch(e) {
     if (area) {
