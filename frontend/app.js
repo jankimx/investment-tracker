@@ -1062,16 +1062,16 @@ function renderAnalyzeQualitySignals(components) {
       analogy: 'Think of ROIC like how efficiently a restaurant turns its tables. Above 15% consistently means the business compounds wealth for its owners.' },
     { key: 'gross_margin', label: 'Competitive Advantage', sub: 'Gross margin stability (moat)',
       get: function(d) { return [['Avg gross margin', d.avg_margin !== undefined ? d.avg_margin+'%' : '--'], ['Trend', d.trend||'--'], ['Value trap flag', d.value_trap_flag ? 'Yes' : 'No']]; },
-      analogy: 'Stable or expanding margins mean customers keep paying full price -- a sign competitors can't easily take their business.' },
+      analogy: 'Stable or expanding margins mean customers keep paying full price -- a sign competitors can not easily take their business.' },
     { key: 'debt_safety', label: 'Financial Safety', sub: 'Debt and interest coverage',
       get: function(d) { return [['Debt-to-equity', d.debt_to_equity !== undefined ? d.debt_to_equity+'x' : '--'], ['Interest coverage', d.interest_coverage ? d.interest_coverage+'x' : 'No debt'], ['Current ratio', d.current_ratio !== undefined ? d.current_ratio+'x' : '--']]; },
       analogy: 'Low debt and strong interest coverage means the company can survive a bad year without going bankrupt.' },
-    { key: 'owner_earnings', label: 'Real Cash Generation', sub: 'Owner earnings (Buffett's metric)',
+    { key: 'owner_earnings', label: 'Real Cash Generation', sub: 'Owner earnings (Buffett metric)',
       get: function(d) { return [['Avg owner earnings', d.avg_owner_earnings !== undefined ? '$'+d.avg_owner_earnings+'B' : '--'], ['Trend', d.trend||'--'], ['Positive years', d.positive_years+'/'+d.total_years]]; },
       analogy: 'Owner earnings strip accounting tricks away to show how much cash you could actually take home as an owner.' },
     { key: 'capital_allocation', label: 'Management Quality', sub: 'Buybacks and shareholder treatment',
       get: function(d) { return [['Share count change', d.share_count_change_pct !== undefined ? d.share_count_change_pct+'%' : '--'], ['Shares reduced?', d.shares_reduced === true ? 'Yes' : d.shares_reduced === false ? 'No' : 'Unknown'], ['Avg SBC % revenue', d.avg_sbc_pct_of_revenue !== undefined ? d.avg_sbc_pct_of_revenue+'%' : '--']]; },
-      analogy: 'Great managers buy back stock when it's cheap and avoid diluting shareholders with excessive stock compensation.' }
+      analogy: 'Great managers buy back stock when it is cheap and avoid diluting shareholders with excessive stock compensation.' }
   ];
 
   return signals.map(function(s, i) {
@@ -1115,7 +1115,7 @@ function renderAnalyzeValueSignals(components) {
       rows: [['FCF yield', fcf.fcf_yield_pct !== undefined ? fcf.fcf_yield_pct+'%' : '--'],
              ['Avg FCF (5yr)', fcf.avg_fcf_billions !== undefined ? '$'+fcf.avg_fcf_billions+'B' : '--'],
              ['FCF trend', fcf.fcf_trend||'--']],
-      analogy: 'FCF yield tells you how much cash you're buying per dollar invested. A 5% yield beats most bonds with ownership upside.',
+      analogy: 'FCF yield tells you how much cash you are buying per dollar invested. A 5% yield beats most bonds with ownership upside.',
       caveat: null },
     { id: 'avdcf', label: 'Intrinsic Value (DCF)', sub: 'Discounted cash flow estimate',
       score: dcf.score||0, max: dcf.max||40, conf: dcf.confidence,
