@@ -329,61 +329,68 @@ SCORES (do not change these numbers):
 - Sector: {profile.get('sector','Unknown')}
 {portfolio_text}
 
-Write exactly these 5 sections. Use the separator === SECTION === between each.
+Respond with exactly this format. Do not add any headers, markdown, or extra formatting. Use EXACTLY these separators with no modifications:
 
-=== BUSINESS ===
-3-4 sentences: what the company does, who pays them, what protects them from competition, biggest risk. Plain English, no jargon.
+SECTION_BUSINESS
+[3-4 sentences: what the company does, who pays them, what protects them from competition, biggest risk. Plain English, no jargon.]
+END_BUSINESS
 
-=== QUALITY ===
-2-3 sentences explaining the quality score for a beginner. Reference the actual numbers above.
+SECTION_QUALITY
+[2-3 sentences explaining the quality score for a beginner. Reference the actual numbers above.]
+END_QUALITY
 
-=== VALUE ===
-2-3 sentences explaining the valuation for a beginner. Reference the actual numbers above.
+SECTION_VALUE
+[2-3 sentences explaining the valuation for a beginner. Reference the actual numbers above.]
+END_VALUE
 
-=== VERDICT ===
-Three paragraphs with bold headers:
-**The Bull Case** - argue genuinely for this investment (3-4 sentences)
-**The Bear Case** - argue strongly AGAINST this investment, do not soften it (3-4 sentences)
-**What Would Need to Be True** - specific conditions for success (2-3 sentences)
-End with one sentence noting this is educational analysis, not financial advice.
+SECTION_VERDICT
+**The Bull Case**
+[3-4 sentences arguing genuinely for this investment]
 
-=== LEARNING ===
-3 concepts from this analysis. For each use exactly:
+**The Bear Case**
+[3-4 sentences arguing strongly AGAINST. Do not soften.]
+
+**What Would Need to Be True**
+[2-3 sentences on specific conditions for success]
+
+This is educational analysis only, not financial advice.
+END_VERDICT
+
+SECTION_LEARNING
 CONCEPT: [name]
-WHAT: [one sentence plain English explanation with analogy]
-WHY HERE: [one sentence specific to this company using actual data]"""
+WHAT: [one sentence plain English with analogy]
+WHY HERE: [one sentence specific to this company with actual numbers]
+
+CONCEPT: [name]
+WHAT: [one sentence plain English with analogy]
+WHY HERE: [one sentence specific to this company with actual numbers]
+
+CONCEPT: [name]
+WHAT: [one sentence plain English with analogy]
+WHY HERE: [one sentence specific to this company with actual numbers]
+END_LEARNING"""
 
     try:
         response = claude_complete(prompt, SYSTEM_PROMPT, max_tokens=2000)
         print(f"[Claude] Got response, length: {len(response)}")
 
-        # Parse sections - robust parsing that handles Claude formatting variations
+        # Parse sections using unambiguous SECTION_X / END_X markers
         import re
         sections = {}
-
-        # Try splitting by === SECTION === pattern
-        section_pattern = re.compile(r'===\s*(BUSINESS|QUALITY|VALUE|VERDICT|LEARNING)\s*===', re.IGNORECASE)
-        matches = list(section_pattern.finditer(response))
-
-        if matches:
-            for i, match in enumerate(matches):
-                section_name = match.group(1).lower()
-                start = match.end()
-                end = matches[i+1].start() if i+1 < len(matches) else len(response)
-                sections[section_name] = response[start:end].strip()
-        else:
-            # Fallback: try splitting by just the section names on their own line
-            for name in ["BUSINESS", "QUALITY", "VALUE", "VERDICT", "LEARNING"]:
-                pattern = re.compile(r'(?:^|\n)\s*' + name + r'\s*\n(.*?)(?=\n\s*(?:BUSINESS|QUALITY|VALUE|VERDICT|LEARNING)\s*\n|$)', re.DOTALL | re.IGNORECASE)
-                m = pattern.search(response)
-                if m:
-                    sections[name.lower()] = m.group(1).strip()
+        for name in ["BUSINESS", "QUALITY", "VALUE", "VERDICT", "LEARNING"]:
+            pattern = re.compile(
+                r'SECTION_' + name + r'\s*\n(.*?)\nEND_' + name,
+                re.DOTALL
+            )
+            m = pattern.search(response)
+            if m:
+                sections[name.lower()] = m.group(1).strip()
 
         print(f"[Claude] Parsed sections: {list(sections.keys())}")
 
         # If still nothing parsed, use whole response as verdict
         if not sections:
-            print(f"[Claude] Could not parse sections, using raw response")
+            print(f"[Claude] Could not parse sections, raw response length: {len(response)}")
             sections["verdict"] = response
 
         # Map to expected keys
