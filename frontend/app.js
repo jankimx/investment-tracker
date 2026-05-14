@@ -819,7 +819,9 @@ function renderProjections() {
 renderProjections();
 
 
+
 // -- Stock Analyzer ----------------------------------------
+
 function initAnalyzeTab() {
   loadRecentAnalyses();
 }
@@ -832,28 +834,29 @@ async function loadRecentAnalyses() {
     const grid = document.getElementById('analyze-recent-grid');
     if (!wrap || !grid) return;
     wrap.style.display = 'block';
-    grid.innerHTML = recent.slice(0, 8).map(function(a) {
+    grid.innerHTML = '';
+    recent.slice(0, 8).forEach(function(a) {
       const color = analyzeScoreColor(a.overall_score || 0);
+      const card = document.createElement('div');
+      card.className = 'analyze-recent-card';
       const sym = a.symbol || '';
-      const name = a.company_name || '';
-      const score = a.overall_score || '--';
-      const verdict = analyzeVerdictLabel(a.verdict);
-      const div = document.createElement('div');
-      div.className = 'analyze-recent-card';
-      div.setAttribute('data-sym', sym);
-      div.onclick = function() { quickAnalyze(this.getAttribute('data-sym')); };
-      div.innerHTML =
-        '<div style="font-size:14px;font-weight:700;margin-bottom:2px">' + escAnalyze(sym) + '</div>' +
-        '<div style="font-size:10px;color:var(--text3);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escAnalyze(name) + '</div>' +
-        '<div style="font-size:20px;font-weight:300;color:' + color + '">' + score + '</div>' +
-        '<div style="font-size:10px;color:var(--text3);margin-top:2px">' + escAnalyze(verdict) + '</div>';
-      return div.outerHTML;
-    }).join('');
-  } catch (e) { /* silent */ }
+      card.onclick = function() { quickAnalyze(sym); };
+
+      const symEl = el('div', sym, 'font-size:14px;font-weight:700;margin-bottom:2px');
+      const nameEl = el('div', a.company_name || '', 'font-size:10px;color:var(--text3);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis');
+      const scoreEl = el('div', String(a.overall_score || '--'), 'font-size:20px;font-weight:300;color:' + color);
+      const verdictEl = el('div', analyzeVerdictLabel(a.verdict), 'font-size:10px;color:var(--text3);margin-top:2px');
+
+      card.appendChild(symEl);
+      card.appendChild(nameEl);
+      card.appendChild(scoreEl);
+      card.appendChild(verdictEl);
+      grid.appendChild(card);
+    });
+  } catch(e) { /* silent */ }
 }
 
-function quickAnalyze(symOrEl) {
-  const symbol = typeof symOrEl === 'string' ? symOrEl : symOrEl.dataset.sym;
+function quickAnalyze(symbol) {
   const input = document.getElementById('analyze-input');
   if (input) input.value = symbol;
   runAnalysis();
@@ -867,26 +870,44 @@ async function runAnalysis() {
   const area = document.getElementById('analyze-report-area');
   const prompt = document.getElementById('analyze-start-prompt');
   if (prompt) prompt.style.display = 'none';
-  if (area) area.innerHTML = analyzeLoadingHtml();
+  if (area) {
+    area.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'text-align:center;padding:60px 0';
+    const spinner = document.createElement('div');
+    spinner.style.cssText = 'width:28px;height:28px;margin:0 auto 14px;border:2px solid var(--border2);border-top-color:var(--green);border-radius:50%;animation:spin 0.8s linear infinite';
+    const msg = el('div', 'Fetching data and generating analysis...', 'font-size:12px;color:var(--text3)');
+    const msg2 = el('div', 'This takes about 30-60 seconds', 'font-size:11px;color:var(--text3);margin-top:6px');
+    wrap.appendChild(spinner);
+    wrap.appendChild(msg);
+    wrap.appendChild(msg2);
+    area.appendChild(wrap);
+  }
 
   try {
     const result = await apiFetch('/analyze/' + symbol);
     renderAnalysisReport(result);
     loadRecentAnalyses();
-  } catch (e) {
-    if (area) area.innerHTML = '<div class="card" style="text-align:center;padding:32px">' +
-      '<div style="color:var(--red);font-size:13px;margin-bottom:8px">' + (e.message || 'Analysis failed') + '</div>' +
-      '<div style="font-size:11px;color:var(--text3)">Check the ticker symbol and try again</div></div>';
+  } catch(e) {
+    if (area) {
+      area.innerHTML = '';
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.style.cssText = 'text-align:center;padding:32px';
+      card.appendChild(el('div', e.message || 'Analysis failed', 'color:var(--red);font-size:13px;margin-bottom:8px'));
+      card.appendChild(el('div', 'Check the ticker symbol and try again', 'font-size:11px;color:var(--text3)'));
+      area.appendChild(card);
+    }
   }
 }
 
-function analyzeLoadingHtml() {
-  return '<div style="text-align:center;padding:60px 0">' +
-    '<div style="width:28px;height:28px;margin:0 auto 14px;border:2px solid var(--border2);' +
-    'border-top-color:var(--green);border-radius:50%;animation:spin 0.8s linear infinite"></div>' +
-    '<div style="font-size:12px;color:var(--text3)">Fetching data and generating analysis...</div>' +
-    '<div style="font-size:11px;color:var(--text3);margin-top:6px">This takes about 30-60 seconds</div>' +
-    '</div>';
+// -- Utilities ---------------------------------------------
+
+function el(tag, text, css) {
+  const e = document.createElement(tag);
+  if (text !== undefined && text !== null) e.textContent = String(text);
+  if (css) e.style.cssText = css;
+  return e;
 }
 
 function analyzeScoreColor(score) {
@@ -905,14 +926,37 @@ function analyzeVerdictLabel(verdict) {
 }
 
 function analyzeConfBadge(conf) {
-  const map = { high: 'conf-high', medium: 'conf-medium', low: 'conf-low' };
-  const label = { high: 'High confidence', medium: 'Medium confidence', low: 'Low confidence' };
-  return '<span class="analyze-conf ' + (map[conf] || 'conf-low') + '">' + (label[conf] || 'Low confidence') + '</span>';
+  const el = document.createElement('span');
+  el.className = 'analyze-conf';
+  if (conf === 'high') { el.classList.add('conf-high'); el.textContent = 'High confidence'; }
+  else if (conf === 'medium') { el.classList.add('conf-medium'); el.textContent = 'Medium confidence'; }
+  else { el.classList.add('conf-low'); el.textContent = 'Low confidence'; }
+  return el;
 }
+
+function sectionLabel(text) {
+  const d = document.createElement('div');
+  d.className = 'analyze-section-label';
+  d.textContent = text;
+  return d;
+}
+
+function card(children, extraStyle) {
+  const d = document.createElement('div');
+  d.className = 'card';
+  if (extraStyle) d.style.cssText = extraStyle;
+  if (Array.isArray(children)) children.forEach(function(c) { if (c) d.appendChild(c); });
+  else if (children) d.appendChild(children);
+  return d;
+}
+
+// -- Main Report Renderer ----------------------------------
 
 function renderAnalysisReport(result) {
   const area = document.getElementById('analyze-report-area');
   if (!area) return;
+  area.innerHTML = '';
+
   const { report, cached, age_hours } = result;
   const { scores, narrative } = report;
   const profile = scores.profile;
@@ -921,378 +965,381 @@ function renderAnalysisReport(result) {
   const trap = scores.value_trap;
   const color = analyzeScoreColor(scores.overall_score);
 
-  let html = '';
-
-  // Cached notice
+  // -- Cached notice -------------------------------------
   if (cached) {
-    html += '<div style="display:flex;align-items:center;justify-content:space-between;' +
-      'font-size:11px;color:var(--text3);background:var(--bg2);border-radius:var(--radius);' +
-      'padding:8px 12px;margin-bottom:12px">' +
-      '<span>Cached analysis (' + Math.round(age_hours) + 'h ago)</span>' +
-      '<button class="btn btn-sm" id="refresh-btn">Refresh</button></div>';
+    const notice = document.createElement('div');
+    notice.style.cssText = 'display:flex;align-items:center;justify-content:space-between;font-size:11px;color:var(--text3);background:var(--bg2);border-radius:var(--radius);padding:8px 12px;margin-bottom:12px';
+    notice.appendChild(el('span', 'Cached analysis (' + Math.round(age_hours) + 'h ago)'));
+    const refreshBtn = document.createElement('button');
+    refreshBtn.className = 'btn btn-sm';
+    refreshBtn.textContent = 'Refresh';
+    refreshBtn.onclick = function() { refreshAnalysis(profile.symbol); };
+    notice.appendChild(refreshBtn);
+    area.appendChild(notice);
   }
 
-  // Header
-  const verdictCls = scores.verdict === 'worth_investigating' ? 'color:var(--green)' :
-                     scores.verdict === 'significant_concerns' ? 'color:var(--red)' : 'color:#ffb347';
-  html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:10px">' +
-    '<div><div style="font-size:20px;font-weight:700;letter-spacing:-0.5px">' + escAnalyze(profile.name) + '</div>' +
-    '<div style="font-size:12px;color:var(--text2);margin-top:2px">' + profile.symbol + ' &middot; ' + (profile.sector || '') + '</div>' +
-    '<div style="margin-top:8px;font-size:12px;font-weight:600;' + verdictCls + '">' + analyzeVerdictLabel(scores.verdict) + '</div></div>' +
-    '<div style="text-align:right"><div class="analyze-score-num" style="color:' + color + '">' + scores.overall_score + '</div>' +
-    '<div style="font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em">Overall Score</div></div></div>';
+  // -- Header --------------------------------------------
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:20px;flex-wrap:wrap;gap:10px';
 
-  // Business
-  html += '<div class="analyze-section-label">The Business</div>';
-  html += '<div class="card"><p style="font-size:13px;line-height:1.75;color:var(--text2)">' + escAnalyze(narrative.business || '') + '</p></div>';
+  const companyInfo = document.createElement('div');
+  companyInfo.appendChild(el('div', profile.name, 'font-size:20px;font-weight:700;letter-spacing:-0.5px'));
+  companyInfo.appendChild(el('div', profile.symbol + ' . ' + (profile.sector || ''), 'font-size:12px;color:var(--text2);margin-top:2px'));
+  const verdictColor = scores.verdict === 'worth_investigating' ? 'var(--green)' :
+                       scores.verdict === 'significant_concerns' ? 'var(--red)' : '#ffb347';
+  companyInfo.appendChild(el('div', analyzeVerdictLabel(scores.verdict), 'margin-top:8px;font-size:12px;font-weight:600;color:' + verdictColor));
 
-  // Value trap
+  const scoreWrap = document.createElement('div');
+  scoreWrap.style.textAlign = 'right';
+  scoreWrap.appendChild(el('div', String(scores.overall_score), 'font-size:48px;font-weight:300;letter-spacing:-2px;line-height:1;color:' + color));
+  scoreWrap.appendChild(el('div', 'Overall Score', 'font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em'));
+
+  header.appendChild(companyInfo);
+  header.appendChild(scoreWrap);
+  area.appendChild(header);
+
+  // -- Business -----------------------------------------
+  area.appendChild(sectionLabel('The Business'));
+  const bizCard = document.createElement('div');
+  bizCard.className = 'card';
+  bizCard.appendChild(el('p', narrative.business || '', 'font-size:13px;line-height:1.75;color:var(--text2)'));
+  area.appendChild(bizCard);
+
+  // -- Value Trap ----------------------------------------
+  area.appendChild(sectionLabel('Value Trap Check'));
   const trapCls = trap.risk_level === 'high' ? 'trap-high' : trap.risk_level === 'medium' ? 'trap-medium' : 'trap-low';
   const trapColor = trap.risk_level === 'high' ? 'var(--red)' : trap.risk_level === 'medium' ? '#ffb347' : 'var(--green)';
-  html += '<div class="analyze-section-label">Value Trap Check</div>';
-  html += '<div class="analyze-trap-card ' + trapCls + '">' +
-    '<div style="font-size:13px;font-weight:600;color:' + trapColor + ';margin-bottom:6px">' + escAnalyze(trap.risk_label) + '</div>' +
-    '<div style="font-size:12px;color:var(--text2);line-height:1.5;margin-bottom:10px">' + escAnalyze(trap.explanation) + '</div>' +
-    trap.signals.map(function(s) {
-      const icon = s.status === 'triggered' ? '<span style="color:var(--red)">x</span>' :
-                   s.status === 'clear' ? '<span style="color:var(--green)">v</span>' : '<span style="color:var(--text3)">?</span>';
-      return '<div style="display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:4px">' +
-        icon + '<span>' + escAnalyze(s.signal) + '</span>' +
-        '<span style="color:var(--text3);font-size:11px">-- ' + escAnalyze(s.detail) + '</span></div>';
-    }).join('') + '</div>';
+  const trapCard = document.createElement('div');
+  trapCard.className = 'analyze-trap-card ' + trapCls;
+  trapCard.appendChild(el('div', trap.risk_label, 'font-size:13px;font-weight:600;color:' + trapColor + ';margin-bottom:6px'));
+  trapCard.appendChild(el('div', trap.explanation, 'font-size:12px;color:var(--text2);line-height:1.5;margin-bottom:10px'));
+  trap.signals.forEach(function(s) {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;font-size:12px;margin-bottom:4px';
+    const icon = document.createElement('span');
+    icon.textContent = s.status === 'triggered' ? 'x' : s.status === 'clear' ? 'v' : '?';
+    icon.style.color = s.status === 'triggered' ? 'var(--red)' : s.status === 'clear' ? 'var(--green)' : 'var(--text3)';
+    row.appendChild(icon);
+    row.appendChild(el('span', s.signal));
+    row.appendChild(el('span', '-- ' + s.detail, 'color:var(--text3);font-size:11px'));
+    trapCard.appendChild(row);
+  });
+  area.appendChild(trapCard);
 
-  // Quality score
-  html += '<div class="analyze-section-label">Quality Score</div>';
-  html += '<div class="card">';
-  html += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">' +
-    '<div style="flex:1;font-size:14px;font-weight:600">Quality</div>' +
-    '<div style="flex:2;height:4px;background:var(--bg3);border-radius:2px">' +
-    '<div style="height:4px;border-radius:2px;width:' + q.score + '%;background:' + analyzeScoreColor(q.score) + '"></div></div>' +
-    '<div style="font-size:18px;font-weight:300;color:' + analyzeScoreColor(q.score) + ';width:50px;text-align:right">' + q.score + '<span style="font-size:11px;color:var(--text3)">/100</span></div></div>';
+  // -- Quality Score -------------------------------------
+  area.appendChild(sectionLabel('Quality Score'));
+  const qCard = document.createElement('div');
+  qCard.className = 'card';
+  appendScoreBar(qCard, 'Quality', q.score, 100);
   if (narrative.quality_narrative) {
-    html += '<p style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:14px">' + escAnalyze(narrative.quality_narrative) + '</p>';
+    qCard.appendChild(el('p', narrative.quality_narrative, 'font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:14px'));
   }
-  html += renderAnalyzeQualitySignals(q.components);
-  html += '</div>';
+  renderQualitySignals(qCard, q.components);
+  area.appendChild(qCard);
 
-  // Value score
-  html += '<div class="analyze-section-label">Value Score</div>';
-  html += '<div class="card">';
-  html += '<div style="display:flex;align-items:center;gap:12px;margin-bottom:14px">' +
-    '<div style="flex:1;font-size:14px;font-weight:600">Value</div>' +
-    '<div style="flex:2;height:4px;background:var(--bg3);border-radius:2px">' +
-    '<div style="height:4px;border-radius:2px;width:' + v.score + '%;background:' + analyzeScoreColor(v.score) + '"></div></div>' +
-    '<div style="font-size:18px;font-weight:300;color:' + analyzeScoreColor(v.score) + ';width:50px;text-align:right">' + v.score + '<span style="font-size:11px;color:var(--text3)">/100</span></div></div>';
+  // -- Value Score ---------------------------------------
+  area.appendChild(sectionLabel('Value Score'));
+  const vCard = document.createElement('div');
+  vCard.className = 'card';
+  appendScoreBar(vCard, 'Value', v.score, 100);
   if (narrative.value_narrative) {
-    html += '<p style="font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:14px">' + escAnalyze(narrative.value_narrative) + '</p>';
+    vCard.appendChild(el('p', narrative.value_narrative, 'font-size:12px;color:var(--text2);line-height:1.6;margin-bottom:14px'));
   }
-  html += renderAnalyzeValueSignals(v.components);
-  html += '</div>';
+  renderValueSignals(vCard, v.components);
+  area.appendChild(vCard);
 
-  // Portfolio fit
+  // -- Portfolio Fit -------------------------------------
   if (narrative.portfolio_fit) {
-    html += '<div class="analyze-section-label">Portfolio Fit</div>';
-    html += '<div class="card" style="background:rgba(91,141,239,0.06);border-color:rgba(91,141,239,0.15)">' +
-      '<div style="font-size:10px;color:var(--blue);font-weight:600;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px">Based on your portfolio</div>' +
-      '<p style="font-size:13px;color:var(--text2);line-height:1.7">' + escAnalyze(narrative.portfolio_fit) + '</p></div>';
+    area.appendChild(sectionLabel('Portfolio Fit'));
+    const pfCard = document.createElement('div');
+    pfCard.className = 'card';
+    pfCard.style.cssText = 'background:rgba(91,141,239,0.06);border-color:rgba(91,141,239,0.15)';
+    pfCard.appendChild(el('div', 'Based on your portfolio', 'font-size:10px;color:var(--blue);font-weight:600;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px'));
+    pfCard.appendChild(el('p', narrative.portfolio_fit, 'font-size:13px;color:var(--text2);line-height:1.7'));
+    area.appendChild(pfCard);
   }
 
-  // Red flags
+  // -- Red Flags -----------------------------------------
   if (scores.red_flags && scores.red_flags.length) {
-    html += '<div class="analyze-section-label">Red Flags</div>';
+    area.appendChild(sectionLabel('Red Flags'));
     scores.red_flags.forEach(function(f) {
-      html += '<div class="analyze-flag-card">' +
-        '<div style="font-size:12px;font-weight:600;color:var(--red);margin-bottom:5px">! ' + escAnalyze(f.title) + '</div>' +
-        '<div style="font-size:12px;color:var(--text2);line-height:1.5">' + escAnalyze(f.detail) + '</div>' +
-        '<div style="font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5">' + escAnalyze(f.why_it_matters) + '</div>' +
-        (f.historical_example ? '<div style="font-size:11px;color:var(--text3);margin-top:5px;font-style:italic">' + escAnalyze(f.historical_example) + '</div>' : '') +
-        '</div>';
+      const fc = document.createElement('div');
+      fc.className = 'analyze-flag-card';
+      fc.appendChild(el('div', '! ' + f.title, 'font-size:12px;font-weight:600;color:var(--red);margin-bottom:5px'));
+      fc.appendChild(el('div', f.detail, 'font-size:12px;color:var(--text2);line-height:1.5'));
+      fc.appendChild(el('div', f.why_it_matters, 'font-size:11px;color:var(--text3);margin-top:6px;line-height:1.5'));
+      if (f.historical_example) {
+        fc.appendChild(el('div', f.historical_example, 'font-size:11px;color:var(--text3);margin-top:5px;font-style:italic'));
+      }
+      area.appendChild(fc);
     });
   }
 
-  // Insider
+  // -- Insider -------------------------------------------
   const ins = scores.insider;
-  const insColor = ins.signal === 'cluster_buying' || ins.signal === 'some_buying' ? 'var(--green)' :
-                   ins.signal === 'cluster_selling' || ins.signal === 'some_selling' ? 'var(--red)' : 'var(--text3)';
-  const insLabel = { cluster_buying:'Cluster Buying', cluster_selling:'Cluster Selling', some_buying:'Some Buying', some_selling:'Some Selling', neutral:'Neutral' };
-  html += '<div class="analyze-section-label">Signals We Weight Lightly</div>';
-  html += '<div class="card">' +
-    '<div style="margin-bottom:10px"><span style="font-size:12px;font-weight:600;color:' + insColor + '">Insider Activity: ' + (insLabel[ins.signal] || 'Neutral') + '</span>' +
-    analyzeConfBadge(ins.confidence) + '</div>' +
-    '<p style="font-size:12px;color:var(--text2);line-height:1.5;margin-bottom:8px">' + escAnalyze(ins.detail) + '</p>' +
-    '<p style="font-size:11px;color:var(--text3);line-height:1.5;font-style:italic">' + escAnalyze(ins.important_caveat) + '</p></div>';
+  const insColor = (ins.signal === 'cluster_buying' || ins.signal === 'some_buying') ? 'var(--green)' :
+                   (ins.signal === 'cluster_selling' || ins.signal === 'some_selling') ? 'var(--red)' : 'var(--text3)';
+  const insLabels = { cluster_buying: 'Cluster Buying', cluster_selling: 'Cluster Selling', some_buying: 'Some Buying', some_selling: 'Some Selling', neutral: 'Neutral' };
+  area.appendChild(sectionLabel('Signals We Weight Lightly'));
+  const insCard = document.createElement('div');
+  insCard.className = 'card';
+  const insHeader = document.createElement('div');
+  insHeader.style.marginBottom = '10px';
+  insHeader.appendChild(el('span', 'Insider Activity: ' + (insLabels[ins.signal] || 'Neutral'), 'font-size:12px;font-weight:600;color:' + insColor));
+  insHeader.appendChild(analyzeConfBadge(ins.confidence));
+  insCard.appendChild(insHeader);
+  insCard.appendChild(el('p', ins.detail, 'font-size:12px;color:var(--text2);line-height:1.5;margin-bottom:8px'));
+  insCard.appendChild(el('p', ins.important_caveat, 'font-size:11px;color:var(--text3);line-height:1.5;font-style:italic'));
+  area.appendChild(insCard);
 
-  // Verdict
-  html += '<div class="analyze-section-label">The Verdict</div>';
-  html += '<div class="card"><div class="analyze-verdict-text">' + formatAnalyzeVerdict(narrative.verdict || '') + '</div></div>';
+  // -- Verdict -------------------------------------------
+  area.appendChild(sectionLabel('The Verdict'));
+  const verdictCard = document.createElement('div');
+  verdictCard.className = 'card';
+  const verdictEl = document.createElement('div');
+  verdictEl.className = 'analyze-verdict-text';
+  verdictEl.innerHTML = formatVerdict(narrative.verdict || '');
+  verdictCard.appendChild(verdictEl);
+  area.appendChild(verdictCard);
 
-  // Learning
-  html += '<div class="analyze-section-label">What You Learned</div>';
-  html += '<div class="card">' + formatAnalyzeLearning(narrative.learning || '') + '</div>';
+  // -- Learning ------------------------------------------
+  area.appendChild(sectionLabel('What You Learned'));
+  const learnCard = document.createElement('div');
+  learnCard.className = 'card';
+  renderLearning(learnCard, narrative.learning || '');
+  area.appendChild(learnCard);
 
-  // Ask a question
-  html += '<div class="analyze-section-label">Ask a Question</div>';
-  html += '<div class="card">' +
-    '<input class="analyze-ask-input" id="analyze-ask-input" placeholder="e.g. What would change your verdict?" />' +
-    '<button class="btn btn-sm" id="analyze-ask-btn">Ask</button>' +
-    '<div id="analyze-ask-answer" style="display:none;margin-top:12px;font-size:13px;color:var(--text2);' +
-    'line-height:1.6;background:var(--bg3);border-radius:var(--radius);padding:12px"></div></div>';
+  // -- Ask a Question ------------------------------------
+  area.appendChild(sectionLabel('Ask a Question'));
+  const askCard = document.createElement('div');
+  askCard.className = 'card';
+  const askInput = document.createElement('input');
+  askInput.className = 'analyze-ask-input';
+  askInput.placeholder = 'e.g. What would change your verdict on this?';
+  const askBtn = document.createElement('button');
+  askBtn.className = 'btn btn-sm';
+  askBtn.textContent = 'Ask';
+  const askAnswer = document.createElement('div');
+  askAnswer.style.cssText = 'display:none;margin-top:12px;font-size:13px;color:var(--text2);line-height:1.6;background:var(--bg3);border-radius:var(--radius);padding:12px';
 
-  // Disclaimer
-  html += '<div style="font-size:11px;color:var(--text3);text-align:center;padding:16px 0;line-height:1.6">' +
-    'Educational analysis only -- not financial advice.<br>' +
-    'Value investing requires patience measured in years, not months.</div>';
+  const sym = profile.symbol;
+  askBtn.onclick = function() { submitAnalyzeQuestion(sym, askInput, askAnswer); };
+  askInput.onkeydown = function(e) { if (e.key === 'Enter') submitAnalyzeQuestion(sym, askInput, askAnswer); };
 
-  area.innerHTML = html;
+  askCard.appendChild(askInput);
+  askCard.appendChild(askBtn);
+  askCard.appendChild(askAnswer);
+  area.appendChild(askCard);
 
-  // Wire up event handlers after DOM is set
-  const refreshBtn = document.getElementById('refresh-btn');
-  if (refreshBtn) refreshBtn.onclick = function() { refreshAnalysis(profile.symbol); };
-
-  const askBtn = document.getElementById('analyze-ask-btn');
-  const askInput = document.getElementById('analyze-ask-input');
-  if (askBtn) askBtn.onclick = function() { submitAnalyzeQuestion(profile.symbol); };
-  if (askInput) askInput.onkeydown = function(e) { if (e.key === 'Enter') submitAnalyzeQuestion(profile.symbol); };
+  // -- Disclaimer ----------------------------------------
+  const disc = el('div', '', 'font-size:11px;color:var(--text3);text-align:center;padding:16px 0;line-height:1.6');
+  disc.innerHTML = 'Educational analysis only &mdash; not financial advice.<br>Value investing requires patience measured in years, not months.';
+  area.appendChild(disc);
 }
 
-function renderAnalyzeQualitySignals(components) {
-  const signals = [
+// -- Score Bar ---------------------------------------------
+
+function appendScoreBar(parent, label, score, max) {
+  const color = analyzeScoreColor(score * (100 / max));
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'display:flex;align-items:center;gap:12px;margin-bottom:14px';
+  wrap.appendChild(el('div', label, 'flex:1;font-size:14px;font-weight:600'));
+  const barWrap = document.createElement('div');
+  barWrap.style.cssText = 'flex:2;height:4px;background:var(--bg3);border-radius:2px';
+  const bar = document.createElement('div');
+  bar.style.cssText = 'height:4px;border-radius:2px;width:' + Math.min(100, score) + '%;background:' + color;
+  barWrap.appendChild(bar);
+  const scoreEl = document.createElement('div');
+  scoreEl.style.cssText = 'font-size:18px;font-weight:300;color:' + color + ';width:50px;text-align:right';
+  const num = document.createElement('span');
+  num.textContent = String(score);
+  const denom = el('span', '/' + max, 'font-size:11px;color:var(--text3)');
+  scoreEl.appendChild(num);
+  scoreEl.appendChild(denom);
+  wrap.appendChild(barWrap);
+  wrap.appendChild(scoreEl);
+  parent.appendChild(wrap);
+}
+
+// -- Signal Rows -------------------------------------------
+
+function makeSignalRow(label, sub, score, max, conf, details, analogy, caveat, id) {
+  const color = analyzeScoreColor(score * (100 / max));
+  const wrap = document.createElement('div');
+
+  const row = document.createElement('div');
+  row.className = 'analyze-signal-row';
+  row.onclick = function() { toggleAnalyzeSignal(id); };
+
+  const dot = document.createElement('div');
+  dot.className = 'analyze-signal-dot';
+  dot.style.background = color;
+
+  const info = document.createElement('div');
+  info.style.flex = '1';
+  info.appendChild(el('div', label, 'font-size:13px'));
+  info.appendChild(el('div', sub, 'font-size:11px;color:var(--text2)'));
+
+  const scoreEl = el('div', score + '/' + max, 'font-size:13px;font-weight:500;color:' + color);
+  const chev = el('div', 'v', 'color:var(--text3);font-size:10px;margin-left:4px');
+
+  row.appendChild(dot);
+  row.appendChild(info);
+  row.appendChild(scoreEl);
+  row.appendChild(analyzeConfBadge(conf));
+  row.appendChild(chev);
+  wrap.appendChild(row);
+
+  const detail = document.createElement('div');
+  detail.className = 'analyze-signal-detail';
+  detail.id = id;
+
+  const grid = document.createElement('div');
+  grid.className = 'analyze-detail-grid';
+  details.forEach(function(d) {
+    grid.appendChild(el('div', d[0], null));
+    grid.children[grid.children.length - 1].className = 'analyze-detail-key';
+    const vEl = el('div', d[1], null);
+    vEl.className = 'analyze-detail-val';
+    grid.appendChild(vEl);
+  });
+  detail.appendChild(grid);
+
+  if (caveat) {
+    detail.appendChild(el('div', caveat, 'margin-top:8px;padding:8px 10px;background:rgba(255,165,0,0.08);border-radius:4px;font-size:11px;color:#ffb347'));
+  }
+
+  detail.appendChild(el('div', analogy, 'padding:9px 11px;background:var(--bg2);border-left:2px solid var(--blue);border-radius:4px;font-size:11px;color:var(--text2);line-height:1.55;margin-top:8px'));
+  wrap.appendChild(detail);
+  return wrap;
+}
+
+function renderQualitySignals(parent, components) {
+  const defs = [
     { key: 'roic', label: 'Business Efficiency', sub: 'Return on Invested Capital (ROIC)',
       analogy: 'Think of ROIC like how efficiently a restaurant turns its tables. Above 15% consistently means the business compounds wealth for its owners.',
-      get: function(d) { return [['Avg ROIC', d.avg_roic !== undefined ? d.avg_roic + '%' : '--'], ['Years above 15%', d.years_above_15pct + '/' + d.total_years], ['Trend', d.trend || '--']]; } },
+      details: function(d) { return [['Avg ROIC', d.avg_roic !== undefined ? d.avg_roic + '%' : '--'], ['Years above 15%', d.years_above_15pct + '/' + d.total_years], ['Trend', d.trend || '--']]; } },
     { key: 'gross_margin', label: 'Competitive Advantage', sub: 'Gross margin stability (moat)',
-      analogy: 'Stable or expanding margins mean customers keep paying full price -- a sign competitors cannot easily take their business.',
-      get: function(d) { return [['Avg gross margin', d.avg_margin !== undefined ? d.avg_margin + '%' : '--'], ['Trend', d.trend || '--'], ['Value trap flag', d.value_trap_flag ? 'Yes' : 'No']]; } },
+      analogy: 'Stable or expanding margins mean customers keep paying full price. A sign competitors cannot easily take their business.',
+      details: function(d) { return [['Avg gross margin', d.avg_margin !== undefined ? d.avg_margin + '%' : '--'], ['Trend', d.trend || '--'], ['Value trap flag', d.value_trap_flag ? 'Yes' : 'No']]; } },
     { key: 'debt_safety', label: 'Financial Safety', sub: 'Debt and interest coverage',
       analogy: 'Low debt and strong interest coverage means the company can survive a bad year without going bankrupt.',
-      get: function(d) { return [['Debt-to-equity', d.debt_to_equity !== undefined ? d.debt_to_equity + 'x' : '--'], ['Interest coverage', d.interest_coverage ? d.interest_coverage + 'x' : 'No debt'], ['Current ratio', d.current_ratio !== undefined ? d.current_ratio + 'x' : '--']]; } },
+      details: function(d) { return [['Debt-to-equity', d.debt_to_equity !== undefined ? d.debt_to_equity + 'x' : '--'], ['Interest coverage', d.interest_coverage ? d.interest_coverage + 'x' : 'No debt'], ['Current ratio', d.current_ratio !== undefined ? d.current_ratio + 'x' : '--']]; } },
     { key: 'owner_earnings', label: 'Real Cash Generation', sub: 'Owner earnings (Buffett metric)',
-      analogy: 'Owner earnings strip accounting tricks away to show how much cash you could actually take home as an owner.',
-      get: function(d) { return [['Avg owner earnings', d.avg_owner_earnings !== undefined ? '$' + d.avg_owner_earnings + 'B' : '--'], ['Trend', d.trend || '--'], ['Positive years', d.positive_years + '/' + d.total_years]]; } },
+      analogy: 'Owner earnings strip accounting tricks away to show how much cash you could actually take home as an owner of this business.',
+      details: function(d) { return [['Avg owner earnings', d.avg_owner_earnings !== undefined ? '$' + d.avg_owner_earnings + 'B' : '--'], ['Trend', d.trend || '--'], ['Positive years', d.positive_years + '/' + d.total_years]]; } },
     { key: 'capital_allocation', label: 'Management Quality', sub: 'Buybacks and shareholder treatment',
       analogy: 'Great managers buy back stock when it is cheap and avoid diluting shareholders with excessive stock compensation.',
-      get: function(d) { return [['Share count change', d.share_count_change_pct !== undefined ? d.share_count_change_pct + '%' : '--'], ['Shares reduced?', d.shares_reduced === true ? 'Yes' : d.shares_reduced === false ? 'No' : 'Unknown'], ['Avg SBC % revenue', d.avg_sbc_pct_of_revenue !== undefined ? d.avg_sbc_pct_of_revenue + '%' : '--']]; } }
+      details: function(d) { return [['Share count change', d.share_count_change_pct !== undefined ? d.share_count_change_pct + '%' : '--'], ['Shares reduced?', d.shares_reduced === true ? 'Yes' : d.shares_reduced === false ? 'No' : 'Unknown'], ['Avg SBC % revenue', d.avg_sbc_pct_of_revenue !== undefined ? d.avg_sbc_pct_of_revenue + '%' : '--']]; } }
   ];
 
-  const wrap = document.createElement('div');
-  signals.forEach(function(s, i) {
+  defs.forEach(function(s, i) {
     const d = components[s.key] || {};
-    const score = d.score || 0;
-    const max = d.max || 20;
-    const color = analyzeScoreColor(score * (100 / max));
-    const id = 'aqsig-' + i;
-
-    const row = document.createElement('div');
-    row.className = 'analyze-signal-row';
-    row.onclick = function() { toggleAnalyzeSignal(id); };
-
-    const dot = document.createElement('div');
-    dot.className = 'analyze-signal-dot';
-    dot.style.background = color;
-
-    const info = document.createElement('div');
-    info.style.flex = '1';
-    info.innerHTML = '<div style="font-size:13px">' + escAnalyze(s.label) + '</div>' +
-      '<div style="font-size:11px;color:var(--text2)">' + escAnalyze(s.sub) + '</div>';
-
-    const scoreEl = document.createElement('div');
-    scoreEl.style.cssText = 'font-size:13px;font-weight:500;color:' + color;
-    scoreEl.textContent = score + '/' + max;
-
-    const confEl = document.createElement('span');
-    confEl.innerHTML = analyzeConfBadge(d.confidence);
-
-    const chev = document.createElement('div');
-    chev.style.cssText = 'color:var(--text3);font-size:10px;margin-left:4px';
-    chev.textContent = 'v';
-
-    row.appendChild(dot);
-    row.appendChild(info);
-    row.appendChild(scoreEl);
-    row.appendChild(confEl);
-    row.appendChild(chev);
-    wrap.appendChild(row);
-
-    const detail = document.createElement('div');
-    detail.className = 'analyze-signal-detail';
-    detail.id = id;
-
-    const grid = document.createElement('div');
-    grid.className = 'analyze-detail-grid';
-    s.get(d).forEach(function(r) {
-      const k = document.createElement('div'); k.className = 'analyze-detail-key'; k.textContent = r[0];
-      const v = document.createElement('div'); v.className = 'analyze-detail-val'; v.textContent = r[1];
-      grid.appendChild(k); grid.appendChild(v);
-    });
-    detail.appendChild(grid);
-
-    if (d.note) {
-      const note = document.createElement('div');
-      note.style.cssText = 'margin-top:8px;font-size:11px;color:var(--text3)';
-      note.textContent = d.note;
-      detail.appendChild(note);
-    }
-
-    const analogy = document.createElement('div');
-    analogy.className = 'analyze-analogy';
-    analogy.textContent = s.analogy;
-    detail.appendChild(analogy);
-    wrap.appendChild(detail);
+    parent.appendChild(makeSignalRow(s.label, s.sub, d.score || 0, d.max || 20, d.confidence, s.details(d), s.analogy, null, 'aqsig-' + i));
   });
-
-  return wrap.innerHTML;
 }
 
-function renderAnalyzeValueSignals(components) {
+function renderValueSignals(parent, components) {
   const ne = components.normalized_earnings || {};
   const fcf = components.fcf_yield || {};
   const dcf = components.dcf || {};
 
-  const signals = [
+  const defs = [
     { id: 'avne', label: 'Price vs History', sub: 'Normalized P/E (10-yr avg earnings)',
-      score: ne.score || 0, max: ne.max || 30, conf: ne.confidence,
-      analogy: 'Averaging 10 years of earnings smooths out good and bad years -- like judging a farmer by average harvests, not just one season.',
-      rows: [['Normalized EPS', ne.normalized_eps !== undefined ? '$' + ne.normalized_eps : '--'],
-             ['Normalized P/E', ne.current_pe_normalized !== undefined ? ne.current_pe_normalized + 'x' : '--'],
-             ['Current price', ne.current_price !== undefined ? '$' + ne.current_price : '--'],
-             ['Assessment', ne.valuation || '--']],
-      caveat: ne.caveat },
+      score: ne.score || 0, max: ne.max || 30, conf: ne.confidence, caveat: ne.caveat,
+      analogy: 'Averaging 10 years of earnings smooths out good and bad years. Like judging a farmer by average harvests, not just one season.',
+      details: [['Normalized EPS', ne.normalized_eps !== undefined ? '$' + ne.normalized_eps : '--'], ['Normalized P/E', ne.current_pe_normalized !== undefined ? ne.current_pe_normalized + 'x' : '--'], ['Current price', ne.current_price !== undefined ? '$' + ne.current_price : '--'], ['Assessment', ne.valuation || '--']] },
     { id: 'avfcf', label: 'Cash Return (FCF Yield)', sub: 'Free cash flow vs market cap',
-      score: fcf.score || 0, max: fcf.max || 30, conf: fcf.confidence,
+      score: fcf.score || 0, max: fcf.max || 30, conf: fcf.confidence, caveat: null,
       analogy: 'FCF yield tells you how much cash you are buying per dollar invested. A 5% yield beats most bonds with ownership upside.',
-      rows: [['FCF yield', fcf.fcf_yield_pct !== undefined ? fcf.fcf_yield_pct + '%' : '--'],
-             ['Avg FCF (5yr)', fcf.avg_fcf_billions !== undefined ? '$' + fcf.avg_fcf_billions + 'B' : '--'],
-             ['FCF trend', fcf.fcf_trend || '--']],
-      caveat: null },
+      details: [['FCF yield', fcf.fcf_yield_pct !== undefined ? fcf.fcf_yield_pct + '%' : '--'], ['Avg FCF (5yr)', fcf.avg_fcf_billions !== undefined ? '$' + fcf.avg_fcf_billions + 'B' : '--'], ['FCF trend', fcf.fcf_trend || '--']] },
     { id: 'avdcf', label: 'Intrinsic Value (DCF)', sub: 'Discounted cash flow estimate',
-      score: dcf.score || 0, max: dcf.max || 40, conf: dcf.confidence,
-      analogy: 'A DCF estimates what all future cash flows are worth today. Treat it as a rough compass, not a GPS -- small assumption changes move the number significantly.',
-      rows: [['DCF estimate', dcf.dcf_estimate !== undefined ? '$' + dcf.dcf_estimate : '--'],
-             ['Range', (dcf.dcf_range_low && dcf.dcf_range_high) ? '$' + dcf.dcf_range_low + ' - $' + dcf.dcf_range_high : '--'],
-             ['Current price', dcf.current_price !== undefined ? '$' + dcf.current_price : '--'],
-             ['Discount/premium', dcf.discount_pct !== undefined ? dcf.discount_pct + '%' : '--']],
-      caveat: dcf.caveat }
+      score: dcf.score || 0, max: dcf.max || 40, conf: dcf.confidence, caveat: dcf.caveat,
+      analogy: 'A DCF estimates what all future cash flows are worth today. Treat it as a rough compass, not a GPS. Small assumption changes move the number significantly.',
+      details: [['DCF estimate', dcf.dcf_estimate !== undefined ? '$' + dcf.dcf_estimate : '--'], ['Range', (dcf.dcf_range_low && dcf.dcf_range_high) ? '$' + dcf.dcf_range_low + ' - $' + dcf.dcf_range_high : '--'], ['Current price', dcf.current_price !== undefined ? '$' + dcf.current_price : '--'], ['Discount/premium', dcf.discount_pct !== undefined ? dcf.discount_pct + '%' : '--']] }
   ];
 
-  const wrap = document.createElement('div');
-  signals.forEach(function(s) {
-    const color = analyzeScoreColor(s.score * (100 / s.max));
-
-    const row = document.createElement('div');
-    row.className = 'analyze-signal-row';
-    row.onclick = (function(id) { return function() { toggleAnalyzeSignal(id); }; })(s.id);
-
-    const dot = document.createElement('div');
-    dot.className = 'analyze-signal-dot';
-    dot.style.background = color;
-
-    const info = document.createElement('div');
-    info.style.flex = '1';
-    info.innerHTML = '<div style="font-size:13px">' + escAnalyze(s.label) + '</div>' +
-      '<div style="font-size:11px;color:var(--text2)">' + escAnalyze(s.sub) + '</div>';
-
-    const scoreEl = document.createElement('div');
-    scoreEl.style.cssText = 'font-size:13px;font-weight:500;color:' + color;
-    scoreEl.textContent = s.score + '/' + s.max;
-
-    const confEl = document.createElement('span');
-    confEl.innerHTML = analyzeConfBadge(s.conf);
-
-    const chev = document.createElement('div');
-    chev.style.cssText = 'color:var(--text3);font-size:10px;margin-left:4px';
-    chev.textContent = 'v';
-
-    row.appendChild(dot); row.appendChild(info); row.appendChild(scoreEl);
-    row.appendChild(confEl); row.appendChild(chev);
-    wrap.appendChild(row);
-
-    const detail = document.createElement('div');
-    detail.className = 'analyze-signal-detail';
-    detail.id = s.id;
-
-    const grid = document.createElement('div');
-    grid.className = 'analyze-detail-grid';
-    s.rows.forEach(function(r) {
-      const k = document.createElement('div'); k.className = 'analyze-detail-key'; k.textContent = r[0];
-      const v = document.createElement('div'); v.className = 'analyze-detail-val'; v.textContent = r[1];
-      grid.appendChild(k); grid.appendChild(v);
-    });
-    detail.appendChild(grid);
-
-    if (s.caveat) {
-      const cav = document.createElement('div');
-      cav.style.cssText = 'margin-top:8px;padding:8px 10px;background:rgba(255,165,0,0.08);border-radius:4px;font-size:11px;color:#ffb347';
-      cav.textContent = s.caveat;
-      detail.appendChild(cav);
-    }
-
-    const analogy = document.createElement('div');
-    analogy.className = 'analyze-analogy';
-    analogy.textContent = s.analogy;
-    detail.appendChild(analogy);
-    wrap.appendChild(detail);
+  defs.forEach(function(s) {
+    parent.appendChild(makeSignalRow(s.label, s.sub, s.score, s.max, s.conf, s.details, s.analogy, s.caveat, s.id));
   });
-
-  return wrap.innerHTML;
 }
-
 
 function toggleAnalyzeSignal(id) {
-  const el = document.getElementById(id);
-  if (el) el.classList.toggle('open');
+  const d = document.getElementById(id);
+  if (d) d.classList.toggle('open');
 }
 
-function formatAnalyzeVerdict(text) {
-  return escAnalyze(text).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+// -- Verdict & Learning ------------------------------------
+
+function formatVerdict(text) {
+  if (!text) return '';
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+  return escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 }
 
-function formatAnalyzeLearning(text) {
+function renderLearning(parent, text) {
   const sections = text.split('CONCEPT:').filter(function(s) { return s.trim(); });
-  if (!sections.length) return '<p style="font-size:12px;color:var(--text2)">' + escAnalyze(text) + '</p>';
-  return sections.map(function(s) {
-    const lines = s.trim().split('
-').filter(function(l) { return l.trim(); });
+  if (!sections.length) {
+    parent.appendChild(el('p', text, 'font-size:12px;color:var(--text2)'));
+    return;
+  }
+  sections.forEach(function(s) {
+    const lines = s.trim().split('\n').filter(function(l) { return l.trim(); });
     const concept = lines[0] ? lines[0].trim() : '';
-    const what = (lines.find(function(l) { return l.startsWith('WHAT:'); }) || '').replace('WHAT:', '').trim();
-    const why = (lines.find(function(l) { return l.startsWith('WHY HERE:'); }) || '').replace('WHY HERE:', '').trim();
-    return '<div class="analyze-learn-item">' +
-      '<div class="analyze-learn-concept">' + escAnalyze(concept) + '</div>' +
-      '<div class="analyze-learn-text">' + escAnalyze(what) + '</div>' +
-      (why ? '<div class="analyze-learn-text" style="color:var(--text3);margin-top:3px">' + escAnalyze(why) + '</div>' : '') +
-      '</div>';
-  }).join('');
+    const whatLine = lines.find(function(l) { return l.startsWith('WHAT:'); });
+    const whyLine = lines.find(function(l) { return l.startsWith('WHY HERE:'); });
+    const what = whatLine ? whatLine.replace('WHAT:', '').trim() : '';
+    const why = whyLine ? whyLine.replace('WHY HERE:', '').trim() : '';
+
+    const item = document.createElement('div');
+    item.className = 'analyze-learn-item';
+    item.appendChild(el('div', concept, null));
+    item.children[0].className = 'analyze-learn-concept';
+    item.appendChild(el('div', what, null));
+    item.children[1].className = 'analyze-learn-text';
+    if (why) {
+      const whyEl = el('div', why, null);
+      whyEl.className = 'analyze-learn-text';
+      whyEl.style.cssText = 'color:var(--text3);margin-top:3px;font-size:12px;color:var(--text2);line-height:1.55';
+      item.appendChild(whyEl);
+    }
+    parent.appendChild(item);
+  });
 }
 
-async function submitAnalyzeQuestion(symbol) {
-  const input = document.getElementById('analyze-ask-input');
-  const answer = document.getElementById('analyze-ask-answer');
-  const question = input ? input.value.trim() : '';
+// -- Ask & Refresh -----------------------------------------
+
+async function submitAnalyzeQuestion(symbol, inputEl, answerEl) {
+  const question = inputEl ? inputEl.value.trim() : '';
   if (!question) return;
-  if (answer) { answer.style.display = 'block'; answer.textContent = 'Thinking...'; }
+  if (answerEl) { answerEl.style.display = 'block'; answerEl.textContent = 'Thinking...'; }
   try {
     const res = await apiFetch('/analyze/' + symbol + '/question', {
       method: 'POST',
-      body: JSON.stringify({ question })
+      body: JSON.stringify({ question: question })
     });
-    if (answer) answer.textContent = res.answer;
-  } catch (e) {
-    if (answer) answer.textContent = 'Could not generate answer. Try again.';
+    if (answerEl) answerEl.textContent = res.answer;
+  } catch(e) {
+    if (answerEl) answerEl.textContent = 'Could not generate answer. Try again.';
   }
 }
 
 async function refreshAnalysis(symbol) {
   const area = document.getElementById('analyze-report-area');
-  if (area) area.innerHTML = analyzeLoadingHtml();
+  if (area) {
+    area.innerHTML = '';
+    area.appendChild(el('div', 'Refreshing analysis...', 'text-align:center;padding:40px;color:var(--text3)'));
+  }
   try {
     const result = await apiFetch('/analyze/' + symbol + '?refresh=true');
     renderAnalysisReport(result);
-  } catch (e) {
-    if (area) area.innerHTML = '<div class="card" style="text-align:center;padding:32px">' +
-      '<div style="color:var(--red)">' + (e.message || 'Refresh failed') + '</div></div>';
+  } catch(e) {
+    if (area) {
+      area.innerHTML = '';
+      area.appendChild(el('div', e.message || 'Refresh failed', 'text-align:center;padding:32px;color:var(--red)'));
+    }
   }
-}
-
-function escAnalyze(str) {
-  if (!str) return '';
-  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
