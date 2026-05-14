@@ -832,19 +832,28 @@ async function loadRecentAnalyses() {
     const grid = document.getElementById('analyze-recent-grid');
     if (!wrap || !grid) return;
     wrap.style.display = 'block';
-    grid.innerHTML = recent.slice(0, 8).map(a => {
+    grid.innerHTML = recent.slice(0, 8).map(function(a) {
       const color = analyzeScoreColor(a.overall_score || 0);
-      return '<div class="analyze-recent-card" onclick="quickAnalyze('' + a.symbol + '')">' +
-        '<div style="font-size:14px;font-weight:700;margin-bottom:2px">' + a.symbol + '</div>' +
-        '<div style="font-size:10px;color:var(--text3);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (a.company_name || '') + '</div>' +
-        '<div style="font-size:20px;font-weight:300;color:' + color + '">' + (a.overall_score || '--') + '</div>' +
-        '<div style="font-size:10px;color:var(--text3);margin-top:2px">' + analyzeVerdictLabel(a.verdict) + '</div>' +
-        '</div>';
+      const sym = a.symbol || '';
+      const name = a.company_name || '';
+      const score = a.overall_score || '--';
+      const verdict = analyzeVerdictLabel(a.verdict);
+      const div = document.createElement('div');
+      div.className = 'analyze-recent-card';
+      div.setAttribute('data-sym', sym);
+      div.onclick = function() { quickAnalyze(this.getAttribute('data-sym')); };
+      div.innerHTML =
+        '<div style="font-size:14px;font-weight:700;margin-bottom:2px">' + escAnalyze(sym) + '</div>' +
+        '<div style="font-size:10px;color:var(--text3);margin-bottom:8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escAnalyze(name) + '</div>' +
+        '<div style="font-size:20px;font-weight:300;color:' + color + '">' + score + '</div>' +
+        '<div style="font-size:10px;color:var(--text3);margin-top:2px">' + escAnalyze(verdict) + '</div>';
+      return div.outerHTML;
     }).join('');
   } catch (e) { /* silent */ }
 }
 
-function quickAnalyze(symbol) {
+function quickAnalyze(symOrEl) {
+  const symbol = typeof symOrEl === 'string' ? symOrEl : symOrEl.dataset.sym;
   const input = document.getElementById('analyze-input');
   if (input) input.value = symbol;
   runAnalysis();
