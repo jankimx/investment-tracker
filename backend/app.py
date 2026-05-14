@@ -5,7 +5,7 @@ from bson import ObjectId
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-import os, json, time, urllib.request, pytz
+import os, json, time, urllib.request, pytz, threading
 from datetime import datetime
 
 load_dotenv()
@@ -13,7 +13,7 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
-# ── Config ────────────────────────────────────────────────
+# -- Config ------------------------------------------------
 MONGO_URI        = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 DB_NAME          = os.getenv("DB_NAME", "investment_tracker")
 APP_PASSWORD     = os.getenv("APP_PASSWORD", "welovetofu")
@@ -22,24 +22,28 @@ RESEND_KEY       = os.getenv("RESEND_API_KEY", "")
 NOTIFY_VERIZON   = os.getenv("NOTIFY_VERIZON", "")
 NOTIFY_ATT       = os.getenv("NOTIFY_ATT", "")
 APP_URL          = os.getenv("APP_URL", "https://investment-tracker-inky.vercel.app")
+FMP_KEY          = os.getenv("FMP_API_KEY", "")
+CLAUDE_KEY       = os.getenv("ANTHROPIC_API_KEY", "")
 
-# ── Database ──────────────────────────────────────────────
+# -- Database ----------------------------------------------
 client   = MongoClient(MONGO_URI)
 db       = client[DB_NAME]
 entries  = db["entries"]
 holdings = db["holdings"]
 txns     = db["transactions"]
 meta     = db["meta"]
+analyses = db["analyses"]  # Stock analysis reports
 
 # Create indexes once at startup
 try:
     entries.create_index([("date", DESCENDING)])
     entries.create_index([("platform", 1), ("stock", 1)])
     txns.create_index([("platform", 1), ("stock", 1), ("date", DESCENDING)])
+    analyses.create_index([("symbol", 1), ("analyzed_at", DESCENDING)])
 except Exception as e:
     print(f"[Startup] Index warning: {e}")
 
-# ── Helpers ───────────────────────────────────────────────
+# -- Helpers -----------------------------------------------
 def serialize(doc):
     doc["id"] = str(doc.pop("_id"))
     return doc
@@ -75,7 +79,7 @@ def do_refresh():
     results = []
     errors  = []
 
-    # Sort by last known value descending — fetch all values in one query
+    # Sort by last known value descending -- fetch all values in one query
     last_entries = {}
     for e in entries.find({}, sort=[("date", DESCENDING)]):
         k = e["platform"] + "||" + e["stock"]
@@ -165,7 +169,7 @@ def send_sms(time_str):
         except Exception as e:
             print(f"[SMS] Failed to {to}: {e}")
 
-# ── Scheduler ─────────────────────────────────────────────
+# -- Scheduler ---------------------------------------------
 scheduler = BackgroundScheduler()
 scheduler.add_job(
     do_refresh,
@@ -173,7 +177,7 @@ scheduler.add_job(
 )
 scheduler.start()
 
-# ── Auth ──────────────────────────────────────────────────
+# -- Auth --------------------------------------------------
 @app.route("/auth", methods=["POST"])
 def auth():
     data = request.get_json() or {}
@@ -181,7 +185,7 @@ def auth():
         return jsonify({"ok": True})
     return jsonify({"ok": False, "error": "Wrong password"}), 401
 
-# ── Holdings ──────────────────────────────────────────────
+# -- Holdings ----------------------------------------------
 @app.route("/holdings", methods=["GET"])
 def get_holdings():
     return jsonify([serialize(h) for h in holdings.find()])
@@ -206,7 +210,7 @@ def delete_holding(hid):
     holdings.delete_one({"_id": ObjectId(hid)})
     return jsonify({"ok": True})
 
-# ── Transactions ──────────────────────────────────────────
+# -- Transactions ------------------------------------------
 @app.route("/transactions", methods=["GET"])
 def get_transactions():
     q = {}
@@ -258,7 +262,7 @@ def delete_transaction(tid):
     txns.delete_one({"_id": ObjectId(tid)})
     return jsonify({"ok": True})
 
-# ── Entries ───────────────────────────────────────────────
+# -- Entries -----------------------------------------------
 @app.route("/entries", methods=["GET"])
 def get_entries():
     q = {}
@@ -283,7 +287,7 @@ def delete_entry(eid):
     entries.delete_one({"_id": ObjectId(eid)})
     return jsonify({"ok": True})
 
-# ── Summary ───────────────────────────────────────────────
+# -- Summary -----------------------------------------------
 @app.route("/summary", methods=["GET"])
 def get_summary():
     all_entries = list(entries.find().sort("date", DESCENDING))
@@ -298,7 +302,7 @@ def get_summary():
     total_value    = sum(e["value"] for e in latest.values())
     total_invested = sum(e.get("invested", 0) for e in latest.values())
 
-    # Daily gain — sum stored daily_gain from latest entries (Method 1: vs prev close)
+    # Daily gain -- sum stored daily_gain from latest entries (Method 1: vs prev close)
     daily_gains = [e["daily_gain"] for e in latest.values() if e.get("daily_gain") is not None]
     daily_gain  = round(sum(daily_gains), 2) if daily_gains else None
     prev_total  = sum(e["value"] - e["daily_gain"] for e in latest.values() if e.get("daily_gain") is not None)
@@ -329,7 +333,7 @@ def get_platforms():
 def get_stocks():
     return jsonify(sorted(entries.distinct("stock")))
 
-# ── Refresh ───────────────────────────────────────────────
+# -- Refresh -----------------------------------------------
 @app.route("/refresh-prices", methods=["POST"])
 def refresh_prices():
     return jsonify(do_refresh())
@@ -347,13 +351,15 @@ def refresh_status():
         "count":           m.get("count", 0)
     })
 
-# ── Health ────────────────────────────────────────────────
+# -- Health ------------------------------------------------
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({
         "status":        "ok",
         "db":            DB_NAME,
         "alpha_vantage": "configured" if AV_KEY else "missing",
+        "fmp":           "configured" if FMP_KEY else "missing -- add FMP_API_KEY",
+        "claude":        "configured" if CLAUDE_KEY else "missing -- add ANTHROPIC_API_KEY",
         "scheduler":     "running"
     })
 
