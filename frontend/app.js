@@ -929,7 +929,7 @@ function renderAnalysisReport(result) {
       'font-size:11px;color:var(--text3);background:var(--bg2);border-radius:var(--radius);' +
       'padding:8px 12px;margin-bottom:12px">' +
       '<span>Cached analysis (' + Math.round(age_hours) + 'h ago)</span>' +
-      '<button class="btn btn-sm" onclick="refreshAnalysis('' + profile.symbol + '')">Refresh</button></div>';
+      '<button class="btn btn-sm" id="refresh-btn">Refresh</button></div>';
   }
 
   // Header
@@ -1033,9 +1033,8 @@ function renderAnalysisReport(result) {
   // Ask a question
   html += '<div class="analyze-section-label">Ask a Question</div>';
   html += '<div class="card">' +
-    '<input class="analyze-ask-input" id="analyze-ask-input" placeholder="e.g. What would change your verdict on this?" ' +
-    'onkeydown="if(event.key==='Enter') submitAnalyzeQuestion('' + profile.symbol + '')" />' +
-    '<button class="btn btn-sm" onclick="submitAnalyzeQuestion('' + profile.symbol + '')">Ask</button>' +
+    '<input class="analyze-ask-input" id="analyze-ask-input" placeholder="e.g. What would change your verdict?" />' +
+    '<button class="btn btn-sm" id="analyze-ask-btn">Ask</button>' +
     '<div id="analyze-ask-answer" style="display:none;margin-top:12px;font-size:13px;color:var(--text2);' +
     'line-height:1.6;background:var(--bg3);border-radius:var(--radius);padding:12px"></div></div>';
 
@@ -1045,6 +1044,15 @@ function renderAnalysisReport(result) {
     'Value investing requires patience measured in years, not months.</div>';
 
   area.innerHTML = html;
+
+  // Wire up event handlers after DOM is set
+  const refreshBtn = document.getElementById('refresh-btn');
+  if (refreshBtn) refreshBtn.onclick = function() { refreshAnalysis(profile.symbol); };
+
+  const askBtn = document.getElementById('analyze-ask-btn');
+  const askInput = document.getElementById('analyze-ask-input');
+  if (askBtn) askBtn.onclick = function() { submitAnalyzeQuestion(profile.symbol); };
+  if (askInput) askInput.onkeydown = function(e) { if (e.key === 'Enter') submitAnalyzeQuestion(profile.symbol); };
 }
 
 function renderAnalyzeQualitySignals(components) {
