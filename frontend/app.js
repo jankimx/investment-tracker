@@ -1057,43 +1057,90 @@ function renderAnalysisReport(result) {
 
 function renderAnalyzeQualitySignals(components) {
   const signals = [
-    { key: 'roic', label: 'Business Efficiency', sub: 'Return on Invested Capital',
-      get: function(d) { return [['Avg ROIC', d.avg_roic !== undefined ? d.avg_roic+'%' : '--'], ['Years above 15%', d.years_above_15pct+'/'+d.total_years], ['Trend', d.trend||'--']]; },
-      analogy: 'Think of ROIC like how efficiently a restaurant turns its tables. Above 15% consistently means the business compounds wealth for its owners.' },
+    { key: 'roic', label: 'Business Efficiency', sub: 'Return on Invested Capital (ROIC)',
+      analogy: 'Think of ROIC like how efficiently a restaurant turns its tables. Above 15% consistently means the business compounds wealth for its owners.',
+      get: function(d) { return [['Avg ROIC', d.avg_roic !== undefined ? d.avg_roic + '%' : '--'], ['Years above 15%', d.years_above_15pct + '/' + d.total_years], ['Trend', d.trend || '--']]; } },
     { key: 'gross_margin', label: 'Competitive Advantage', sub: 'Gross margin stability (moat)',
-      get: function(d) { return [['Avg gross margin', d.avg_margin !== undefined ? d.avg_margin+'%' : '--'], ['Trend', d.trend||'--'], ['Value trap flag', d.value_trap_flag ? 'Yes' : 'No']]; },
-      analogy: 'Stable or expanding margins mean customers keep paying full price -- a sign competitors can not easily take their business.' },
+      analogy: 'Stable or expanding margins mean customers keep paying full price -- a sign competitors cannot easily take their business.',
+      get: function(d) { return [['Avg gross margin', d.avg_margin !== undefined ? d.avg_margin + '%' : '--'], ['Trend', d.trend || '--'], ['Value trap flag', d.value_trap_flag ? 'Yes' : 'No']]; } },
     { key: 'debt_safety', label: 'Financial Safety', sub: 'Debt and interest coverage',
-      get: function(d) { return [['Debt-to-equity', d.debt_to_equity !== undefined ? d.debt_to_equity+'x' : '--'], ['Interest coverage', d.interest_coverage ? d.interest_coverage+'x' : 'No debt'], ['Current ratio', d.current_ratio !== undefined ? d.current_ratio+'x' : '--']]; },
-      analogy: 'Low debt and strong interest coverage means the company can survive a bad year without going bankrupt.' },
+      analogy: 'Low debt and strong interest coverage means the company can survive a bad year without going bankrupt.',
+      get: function(d) { return [['Debt-to-equity', d.debt_to_equity !== undefined ? d.debt_to_equity + 'x' : '--'], ['Interest coverage', d.interest_coverage ? d.interest_coverage + 'x' : 'No debt'], ['Current ratio', d.current_ratio !== undefined ? d.current_ratio + 'x' : '--']]; } },
     { key: 'owner_earnings', label: 'Real Cash Generation', sub: 'Owner earnings (Buffett metric)',
-      get: function(d) { return [['Avg owner earnings', d.avg_owner_earnings !== undefined ? '$'+d.avg_owner_earnings+'B' : '--'], ['Trend', d.trend||'--'], ['Positive years', d.positive_years+'/'+d.total_years]]; },
-      analogy: 'Owner earnings strip accounting tricks away to show how much cash you could actually take home as an owner.' },
+      analogy: 'Owner earnings strip accounting tricks away to show how much cash you could actually take home as an owner.',
+      get: function(d) { return [['Avg owner earnings', d.avg_owner_earnings !== undefined ? '$' + d.avg_owner_earnings + 'B' : '--'], ['Trend', d.trend || '--'], ['Positive years', d.positive_years + '/' + d.total_years]]; } },
     { key: 'capital_allocation', label: 'Management Quality', sub: 'Buybacks and shareholder treatment',
-      get: function(d) { return [['Share count change', d.share_count_change_pct !== undefined ? d.share_count_change_pct+'%' : '--'], ['Shares reduced?', d.shares_reduced === true ? 'Yes' : d.shares_reduced === false ? 'No' : 'Unknown'], ['Avg SBC % revenue', d.avg_sbc_pct_of_revenue !== undefined ? d.avg_sbc_pct_of_revenue+'%' : '--']]; },
-      analogy: 'Great managers buy back stock when it is cheap and avoid diluting shareholders with excessive stock compensation.' }
+      analogy: 'Great managers buy back stock when it is cheap and avoid diluting shareholders with excessive stock compensation.',
+      get: function(d) { return [['Share count change', d.share_count_change_pct !== undefined ? d.share_count_change_pct + '%' : '--'], ['Shares reduced?', d.shares_reduced === true ? 'Yes' : d.shares_reduced === false ? 'No' : 'Unknown'], ['Avg SBC % revenue', d.avg_sbc_pct_of_revenue !== undefined ? d.avg_sbc_pct_of_revenue + '%' : '--']]; } }
   ];
 
-  return signals.map(function(s, i) {
+  const wrap = document.createElement('div');
+  signals.forEach(function(s, i) {
     const d = components[s.key] || {};
-    const score = d.score || 0; const max = d.max || 20;
-    const color = analyzeScoreColor(score * (100/max));
+    const score = d.score || 0;
+    const max = d.max || 20;
+    const color = analyzeScoreColor(score * (100 / max));
     const id = 'aqsig-' + i;
-    const rows = s.get(d).map(function(r) {
-      return '<div class="analyze-detail-key">' + r[0] + '</div><div class="analyze-detail-val">' + r[1] + '</div>';
-    }).join('');
-    return '<div class="analyze-signal-row" onclick="toggleAnalyzeSignal('' + id + '')">' +
-      '<div class="analyze-signal-dot" style="background:' + color + '"></div>' +
-      '<div style="flex:1"><div style="font-size:13px">' + s.label + '</div>' +
-      '<div style="font-size:11px;color:var(--text2)">' + s.sub + '</div></div>' +
-      '<div style="font-size:13px;font-weight:500;color:' + color + '">' + score + '/' + max + '</div>' +
-      analyzeConfBadge(d.confidence) +
-      '<div style="color:var(--text3);font-size:10px;margin-left:4px">v</div></div>' +
-      '<div class="analyze-signal-detail" id="' + id + '">' +
-      '<div class="analyze-detail-grid">' + rows + '</div>' +
-      (d.note ? '<div style="margin-top:8px;font-size:11px;color:var(--text3)">' + escAnalyze(d.note) + '</div>' : '') +
-      '<div class="analyze-analogy">' + escAnalyze(s.analogy) + '</div></div>';
-  }).join('');
+
+    const row = document.createElement('div');
+    row.className = 'analyze-signal-row';
+    row.onclick = function() { toggleAnalyzeSignal(id); };
+
+    const dot = document.createElement('div');
+    dot.className = 'analyze-signal-dot';
+    dot.style.background = color;
+
+    const info = document.createElement('div');
+    info.style.flex = '1';
+    info.innerHTML = '<div style="font-size:13px">' + escAnalyze(s.label) + '</div>' +
+      '<div style="font-size:11px;color:var(--text2)">' + escAnalyze(s.sub) + '</div>';
+
+    const scoreEl = document.createElement('div');
+    scoreEl.style.cssText = 'font-size:13px;font-weight:500;color:' + color;
+    scoreEl.textContent = score + '/' + max;
+
+    const confEl = document.createElement('span');
+    confEl.innerHTML = analyzeConfBadge(d.confidence);
+
+    const chev = document.createElement('div');
+    chev.style.cssText = 'color:var(--text3);font-size:10px;margin-left:4px';
+    chev.textContent = 'v';
+
+    row.appendChild(dot);
+    row.appendChild(info);
+    row.appendChild(scoreEl);
+    row.appendChild(confEl);
+    row.appendChild(chev);
+    wrap.appendChild(row);
+
+    const detail = document.createElement('div');
+    detail.className = 'analyze-signal-detail';
+    detail.id = id;
+
+    const grid = document.createElement('div');
+    grid.className = 'analyze-detail-grid';
+    s.get(d).forEach(function(r) {
+      const k = document.createElement('div'); k.className = 'analyze-detail-key'; k.textContent = r[0];
+      const v = document.createElement('div'); v.className = 'analyze-detail-val'; v.textContent = r[1];
+      grid.appendChild(k); grid.appendChild(v);
+    });
+    detail.appendChild(grid);
+
+    if (d.note) {
+      const note = document.createElement('div');
+      note.style.cssText = 'margin-top:8px;font-size:11px;color:var(--text3)';
+      note.textContent = d.note;
+      detail.appendChild(note);
+    }
+
+    const analogy = document.createElement('div');
+    analogy.className = 'analyze-analogy';
+    analogy.textContent = s.analogy;
+    detail.appendChild(analogy);
+    wrap.appendChild(detail);
+  });
+
+  return wrap.innerHTML;
 }
 
 function renderAnalyzeValueSignals(components) {
@@ -1103,48 +1150,92 @@ function renderAnalyzeValueSignals(components) {
 
   const signals = [
     { id: 'avne', label: 'Price vs History', sub: 'Normalized P/E (10-yr avg earnings)',
-      score: ne.score||0, max: ne.max||30, conf: ne.confidence,
-      rows: [['Normalized EPS', ne.normalized_eps !== undefined ? '$'+ne.normalized_eps : '--'],
-             ['Normalized P/E', ne.current_pe_normalized !== undefined ? ne.current_pe_normalized+'x' : '--'],
-             ['Current price', ne.current_price !== undefined ? '$'+ne.current_price : '--'],
-             ['Assessment', ne.valuation||'--']],
+      score: ne.score || 0, max: ne.max || 30, conf: ne.confidence,
       analogy: 'Averaging 10 years of earnings smooths out good and bad years -- like judging a farmer by average harvests, not just one season.',
+      rows: [['Normalized EPS', ne.normalized_eps !== undefined ? '$' + ne.normalized_eps : '--'],
+             ['Normalized P/E', ne.current_pe_normalized !== undefined ? ne.current_pe_normalized + 'x' : '--'],
+             ['Current price', ne.current_price !== undefined ? '$' + ne.current_price : '--'],
+             ['Assessment', ne.valuation || '--']],
       caveat: ne.caveat },
     { id: 'avfcf', label: 'Cash Return (FCF Yield)', sub: 'Free cash flow vs market cap',
-      score: fcf.score||0, max: fcf.max||30, conf: fcf.confidence,
-      rows: [['FCF yield', fcf.fcf_yield_pct !== undefined ? fcf.fcf_yield_pct+'%' : '--'],
-             ['Avg FCF (5yr)', fcf.avg_fcf_billions !== undefined ? '$'+fcf.avg_fcf_billions+'B' : '--'],
-             ['FCF trend', fcf.fcf_trend||'--']],
+      score: fcf.score || 0, max: fcf.max || 30, conf: fcf.confidence,
       analogy: 'FCF yield tells you how much cash you are buying per dollar invested. A 5% yield beats most bonds with ownership upside.',
+      rows: [['FCF yield', fcf.fcf_yield_pct !== undefined ? fcf.fcf_yield_pct + '%' : '--'],
+             ['Avg FCF (5yr)', fcf.avg_fcf_billions !== undefined ? '$' + fcf.avg_fcf_billions + 'B' : '--'],
+             ['FCF trend', fcf.fcf_trend || '--']],
       caveat: null },
     { id: 'avdcf', label: 'Intrinsic Value (DCF)', sub: 'Discounted cash flow estimate',
-      score: dcf.score||0, max: dcf.max||40, conf: dcf.confidence,
-      rows: [['DCF estimate', dcf.dcf_estimate !== undefined ? '$'+dcf.dcf_estimate : '--'],
-             ['Range', (dcf.dcf_range_low&&dcf.dcf_range_high) ? '$'+dcf.dcf_range_low+' - $'+dcf.dcf_range_high : '--'],
-             ['Current price', dcf.current_price !== undefined ? '$'+dcf.current_price : '--'],
-             ['Discount/premium', dcf.discount_pct !== undefined ? dcf.discount_pct+'%' : '--']],
+      score: dcf.score || 0, max: dcf.max || 40, conf: dcf.confidence,
       analogy: 'A DCF estimates what all future cash flows are worth today. Treat it as a rough compass, not a GPS -- small assumption changes move the number significantly.',
+      rows: [['DCF estimate', dcf.dcf_estimate !== undefined ? '$' + dcf.dcf_estimate : '--'],
+             ['Range', (dcf.dcf_range_low && dcf.dcf_range_high) ? '$' + dcf.dcf_range_low + ' - $' + dcf.dcf_range_high : '--'],
+             ['Current price', dcf.current_price !== undefined ? '$' + dcf.current_price : '--'],
+             ['Discount/premium', dcf.discount_pct !== undefined ? dcf.discount_pct + '%' : '--']],
       caveat: dcf.caveat }
   ];
 
-  return signals.map(function(s) {
-    const color = analyzeScoreColor(s.score * (100/s.max));
-    const rows = s.rows.map(function(r) {
-      return '<div class="analyze-detail-key">' + r[0] + '</div><div class="analyze-detail-val">' + r[1] + '</div>';
-    }).join('');
-    return '<div class="analyze-signal-row" onclick="toggleAnalyzeSignal('' + s.id + '')">' +
-      '<div class="analyze-signal-dot" style="background:' + color + '"></div>' +
-      '<div style="flex:1"><div style="font-size:13px">' + s.label + '</div>' +
-      '<div style="font-size:11px;color:var(--text2)">' + s.sub + '</div></div>' +
-      '<div style="font-size:13px;font-weight:500;color:' + color + '">' + s.score + '/' + s.max + '</div>' +
-      analyzeConfBadge(s.conf) +
-      '<div style="color:var(--text3);font-size:10px;margin-left:4px">v</div></div>' +
-      '<div class="analyze-signal-detail" id="' + s.id + '">' +
-      '<div class="analyze-detail-grid">' + rows + '</div>' +
-      (s.caveat ? '<div style="margin-top:8px;padding:8px 10px;background:rgba(255,165,0,0.08);border-radius:4px;font-size:11px;color:#ffb347">' + escAnalyze(s.caveat) + '</div>' : '') +
-      '<div class="analyze-analogy">' + escAnalyze(s.analogy) + '</div></div>';
-  }).join('');
+  const wrap = document.createElement('div');
+  signals.forEach(function(s) {
+    const color = analyzeScoreColor(s.score * (100 / s.max));
+
+    const row = document.createElement('div');
+    row.className = 'analyze-signal-row';
+    row.onclick = (function(id) { return function() { toggleAnalyzeSignal(id); }; })(s.id);
+
+    const dot = document.createElement('div');
+    dot.className = 'analyze-signal-dot';
+    dot.style.background = color;
+
+    const info = document.createElement('div');
+    info.style.flex = '1';
+    info.innerHTML = '<div style="font-size:13px">' + escAnalyze(s.label) + '</div>' +
+      '<div style="font-size:11px;color:var(--text2)">' + escAnalyze(s.sub) + '</div>';
+
+    const scoreEl = document.createElement('div');
+    scoreEl.style.cssText = 'font-size:13px;font-weight:500;color:' + color;
+    scoreEl.textContent = s.score + '/' + s.max;
+
+    const confEl = document.createElement('span');
+    confEl.innerHTML = analyzeConfBadge(s.conf);
+
+    const chev = document.createElement('div');
+    chev.style.cssText = 'color:var(--text3);font-size:10px;margin-left:4px';
+    chev.textContent = 'v';
+
+    row.appendChild(dot); row.appendChild(info); row.appendChild(scoreEl);
+    row.appendChild(confEl); row.appendChild(chev);
+    wrap.appendChild(row);
+
+    const detail = document.createElement('div');
+    detail.className = 'analyze-signal-detail';
+    detail.id = s.id;
+
+    const grid = document.createElement('div');
+    grid.className = 'analyze-detail-grid';
+    s.rows.forEach(function(r) {
+      const k = document.createElement('div'); k.className = 'analyze-detail-key'; k.textContent = r[0];
+      const v = document.createElement('div'); v.className = 'analyze-detail-val'; v.textContent = r[1];
+      grid.appendChild(k); grid.appendChild(v);
+    });
+    detail.appendChild(grid);
+
+    if (s.caveat) {
+      const cav = document.createElement('div');
+      cav.style.cssText = 'margin-top:8px;padding:8px 10px;background:rgba(255,165,0,0.08);border-radius:4px;font-size:11px;color:#ffb347';
+      cav.textContent = s.caveat;
+      detail.appendChild(cav);
+    }
+
+    const analogy = document.createElement('div');
+    analogy.className = 'analyze-analogy';
+    analogy.textContent = s.analogy;
+    detail.appendChild(analogy);
+    wrap.appendChild(detail);
+  });
+
+  return wrap.innerHTML;
 }
+
 
 function toggleAnalyzeSignal(id) {
   const el = document.getElementById(id);
