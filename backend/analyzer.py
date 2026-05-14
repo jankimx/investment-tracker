@@ -72,12 +72,18 @@ def fetch_all_data(symbol):
             name, data = future.result()
             results[name] = data
 
-    # Validate critical data exists
+    # Validate critical data exists. Only profile + income are strictly required;
+    # the rest gracefully degrade (each scorer reports low confidence).
     data_status = {k: bool(v) for k, v in results.items()}
     print(f"[Analyzer] Data status for {symbol}: {data_status}")
-    if not results.get("profile") or not results.get("income"):
-        missing = [k for k, v in data_status.items() if not v]
-        raise ValueError(f"No data found for symbol: {symbol}. Missing endpoints: {missing}. This may require an FMP Starter plan.")
+    required = ["profile", "income"]
+    missing_required = [k for k in required if not results.get(k)]
+    if missing_required:
+        raise ValueError(
+            f"No data found for symbol: {symbol}. "
+            f"Missing required endpoints: {missing_required}. "
+            f"Check that the ticker exists and your FMP plan covers profile + income statements."
+        )
 
     return results
 
@@ -461,26 +467,24 @@ def score_capital_allocation(income_statements, balance_sheets, price_data):
         return {"score": 10, "max": 20, "confidence": "low",
                 "note": "Insufficient data for capital allocation analysis"}
 
-    # Calculate retained earnings over available period
-    total_retained = 0
-    total_dividends = 0
+    # SBC as % of revenue across the window
     sbc_values = []
-
-    for cf_stmt in income_statements[:10]:
-        net_income = cf_stmt.get("netIncome", 0) or 0
-        revenue = cf_stmt.get("revenue", 0) or 1
-        sbc = cf_stmt.get("stockBasedCompensation", 0) or 0
+    for stmt in income_statements[:10]:
+        revenue = stmt.get("revenue", 0) or 1
+        sbc     = stmt.get("stockBasedCompensation", 0) or 0
         sbc_values.append(sbc / revenue * 100 if revenue > 0 else 0)
 
-    # Get shares outstanding trend (buyback signal)
+    # Buyback signal: change in actual share count (NOT the commonStock par-value
+    # line on the balance sheet, which barely moves regardless of buybacks).
+    # weightedAverageShsOut is the share count used to compute EPS.
     shares_trend = []
-    for bs in balance_sheets[:10]:
-        shares = bs.get("commonStock", None)
-        if shares is not None:
+    for stmt in income_statements[:10]:
+        shares = (stmt.get("weightedAverageShsOut")
+                  or stmt.get("weightedAverageShsOutDil"))
+        if shares:
             shares_trend.append(float(shares))
 
-    # Check share count reduction (cannibal signal)
-    if len(shares_trend) >= 3:
+    if len(shares_trend) >= 3 and shares_trend[-1] > 0:
         share_change_pct = ((shares_trend[0] / shares_trend[-1]) - 1) * 100
         if share_change_pct < -20:
             buyback_score = 8  # Aggressive cannibal - excellent
@@ -558,11 +562,13 @@ def score_normalized_earnings(income_statements, price_data):
     
     current_price = float(current_price)
 
-    # Get EPS over available years
+    # Get EPS over available years. Keep negative years -- normalized earnings
+    # are supposed to include the bad years for cyclicals, otherwise the
+    # average overstates earnings power and the P/E looks artificially cheap.
     eps_values = []
     for stmt in income_statements:
         eps = stmt.get("eps")
-        if eps is not None and float(eps) > 0:
+        if eps is not None:
             eps_values.append(float(eps))
 
     if not eps_values:
@@ -572,13 +578,13 @@ def score_normalized_earnings(income_statements, price_data):
     years = len(eps_values)
 
     # Detect high-growth companies where 10yr average is misleading
-    # If recent EPS is 3x+ the oldest EPS, company has grown significantly
+    # If recent EPS is 2.5x+ the oldest positive year, company has grown significantly
     consistent_growth = False
-    if len(eps_values) >= 5 and eps_values[-1] > 0:
+    if len(eps_values) >= 5 and eps_values[-1] > 0 and eps_values[0] > 0:
         growth_multiple = eps_values[0] / eps_values[-1]
         consistent_growth = growth_multiple >= 2.5
 
-    # For high-growth companies use 5-year average, otherwise 10-year
+    # For high-growth companies use 5-year average, otherwise full window
     if consistent_growth and len(eps_values) >= 5:
         normalized_eps = sum(eps_values[:5]) / 5
         normalization_note = "5-year average used (consistent growth makes 10-yr average misleading)"
@@ -586,14 +592,23 @@ def score_normalized_earnings(income_statements, price_data):
         normalized_eps = sum(eps_values) / len(eps_values)
         normalization_note = f"{years}-year average"
 
-    current_pe = current_price / normalized_eps if normalized_eps > 0 else 999
+    if normalized_eps <= 0:
+        return {"score": 5, "max": 30, "confidence": "medium",
+                "normalized_eps": round(normalized_eps, 2),
+                "current_price": round(current_price, 2),
+                "years_of_data": years,
+                "valuation": "Negative normalized earnings -- no meaningful P/E",
+                "values": [round(v, 2) for v in eps_values],
+                "note": "Average EPS over the window is negative; valuation by P/E is not meaningful."}
 
-    # Check for business model change - if EPS variance is very high,
-    # normalized earnings may be less meaningful
+    current_pe = current_price / normalized_eps
+
+    # Coefficient-of-variation flag: very volatile earnings mean normalized
+    # earnings are less reliable.
     if len(eps_values) >= 5:
         avg = sum(eps_values) / len(eps_values)
         variance = sum((v - avg) ** 2 for v in eps_values) / len(eps_values)
-        cv = (variance ** 0.5) / avg if avg > 0 else 0
+        cv = (variance ** 0.5) / abs(avg) if avg != 0 else 0
         business_changed_flag = cv > 0.5
     else:
         business_changed_flag = False
@@ -616,16 +631,6 @@ def score_normalized_earnings(income_statements, price_data):
     else:
         score = 5
         valuation = "Very expensive vs normalized earnings"
-
-    # Check for business model change - if EPS variance is very high,
-    # normalized earnings may be less meaningful
-    if len(eps_values) >= 5:
-        avg = sum(eps_values) / len(eps_values)
-        variance = sum((v - avg) ** 2 for v in eps_values) / len(eps_values)
-        cv = (variance ** 0.5) / avg if avg > 0 else 0
-        business_changed_flag = cv > 0.5  # High variance suggests business change
-    else:
-        business_changed_flag = False
 
     confidence = "high" if years >= 7 else "medium" if years >= 4 else "low"
 
@@ -890,7 +895,7 @@ def detect_red_flags(data):
         cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
         recent_sells = [t for t in insider
                         if t.get("transactionDate", "") >= cutoff
-                        and t.get("acquistionOrDisposition", "") == "D"
+                        and t.get("acquistionOrDisposition", "") == "D"  # FMP's actual misspelling -- do not "fix"
                         and t.get("transactionType", "") in ["S-Sale", "S-Sale+OE"]]
         if len(recent_sells) >= 3:
             total_value = sum(

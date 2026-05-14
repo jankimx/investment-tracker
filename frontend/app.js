@@ -1,5 +1,8 @@
 // -- Config ------------------------------------------------
-const API = 'https://web-production-780915.up.railway.app';
+// API URL can be overridden by setting localStorage.api_url (handy for local dev).
+const DEFAULT_API = 'https://web-production-780915.up.railway.app';
+const API = (localStorage.getItem('api_url') || DEFAULT_API).replace(/\/+$/, '');
+const REQUEST_TIMEOUT_MS = 60000; // analyzer can take 30-60s; everything else is fast
 
 // -- State -------------------------------------------------
 let state = {
@@ -15,7 +18,8 @@ let projChart   = null;
 document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('entry-date').value = today();
   document.getElementById('txn-date').value   = today();
-  if (sessionStorage.getItem('auth')) showApp();
+  if (sessionStorage.getItem('token')) showApp();
+  renderProjections();
 });
 
 // -- Utilities ---------------------------------------------
@@ -44,6 +48,31 @@ function badgeClass(s) {
   return 'b' + h;
 }
 
+// Build a <span class="badge ..."> with the platform name as textContent so
+// user-controlled values can never become HTML.
+function badgeEl(name) {
+  const span = document.createElement('span');
+  span.className = `badge ${badgeClass(name)}`;
+  span.textContent = name;
+  return span;
+}
+
+// <td> with text content; pass cls for className.
+function tdText(text, cls) {
+  const td = document.createElement('td');
+  td.textContent = text == null ? '' : String(text);
+  if (cls) td.className = cls;
+  return td;
+}
+
+// <td> wrapping a single child element.
+function tdNode(node, cls) {
+  const td = document.createElement('td');
+  if (node) td.appendChild(node);
+  if (cls) td.className = cls;
+  return td;
+}
+
 const COLORS = ['#4a90e2','#23d160','#ffb347','#c875ff','#ff6b7a','#00d2d3','#f9ca24','#6ab04c'];
 function colorFor(s) {
   let h = 0;
@@ -60,11 +89,31 @@ function showToast(msg, dur = 2500) {
 
 // -- API ---------------------------------------------------
 async function api(path, opts = {}) {
-  const res = await fetch(API + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts
-  });
-  const data = await res.json();
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  const token = sessionStorage.getItem('token');
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(API + path, { ...opts, headers, signal: ctrl.signal });
+  } catch (e) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('Request timed out');
+    throw e;
+  }
+  clearTimeout(timer);
+
+  // Server says our session is dead — drop to login.
+  if (res.status === 401 && path !== '/auth') {
+    sessionStorage.removeItem('token');
+    location.reload();
+    throw new Error('Session expired');
+  }
+
+  let data = {};
+  try { data = await res.json(); } catch { /* empty body is fine */ }
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
@@ -79,14 +128,14 @@ async function doLogin() {
       method: 'POST',
       body: JSON.stringify({ password: pw })
     });
-    if (data.ok) {
-      sessionStorage.setItem('auth', '1');
+    if (data.ok && data.token) {
+      sessionStorage.setItem('token', data.token);
       showApp();
     } else {
       err.textContent = 'Wrong password.';
     }
-  } catch {
-    err.textContent = 'Cannot reach server.';
+  } catch (e) {
+    err.textContent = e.message === 'Request timed out' ? 'Server not responding.' : 'Cannot reach server.';
   }
 }
 
@@ -94,8 +143,9 @@ document.getElementById('login-pw').addEventListener('keydown', e => {
   if (e.key === 'Enter') doLogin();
 });
 
-function logout() {
-  sessionStorage.removeItem('auth');
+async function logout() {
+  try { await api('/auth/logout', { method: 'POST' }); } catch { /* best effort */ }
+  sessionStorage.removeItem('token');
   location.reload();
 }
 
@@ -129,13 +179,20 @@ async function loadAll() {
   }
 }
 
+function fillDatalist(id, values) {
+  const dl = document.getElementById(id);
+  if (!dl) return;
+  dl.replaceChildren(...values.map(v => {
+    const o = document.createElement('option');
+    o.value = v;
+    return o;
+  }));
+}
+
 function updateDataLists() {
-  document.getElementById('dl-platform').innerHTML =
-    state.platforms.map(p => `<option value="${p}">`).join('');
-  document.getElementById('dl-stock').innerHTML =
-    state.stocks.map(s => `<option value="${s}">`).join('');
-  document.getElementById('dl-h-platform').innerHTML =
-    state.platforms.map(p => `<option value="${p}">`).join('');
+  fillDatalist('dl-platform', state.platforms);
+  fillDatalist('dl-stock', state.stocks);
+  fillDatalist('dl-h-platform', state.platforms);
 }
 
 // -- Tabs --------------------------------------------------
@@ -146,7 +203,7 @@ function switchTab(tab) {
   document.getElementById(`tab-${tab}`).classList.add('active');
   if (tab === 'history')     renderHistory();
   if (tab === 'projections') renderProjections();
-  if (tab === 'holdings')    renderHoldings(), renderTransactions();
+  if (tab === 'holdings')    { renderHoldings(); renderTransactions(); }
   if (tab === 'analyze')     initAnalyzeTab();
 }
 
@@ -200,8 +257,18 @@ function renderDashboard() {
   // Platform filter
   const pfSel = document.getElementById('dash-platform');
   const curPF = pfSel.value;
-  pfSel.innerHTML = '<option value="all">All platforms</option>' +
-    state.platforms.map(p => `<option value="${p}"${p === curPF ? ' selected' : ''}>${p}</option>`).join('');
+  pfSel.replaceChildren();
+  const allOpt = document.createElement('option');
+  allOpt.value = 'all';
+  allOpt.textContent = 'All platforms';
+  pfSel.appendChild(allOpt);
+  state.platforms.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p;
+    o.textContent = p;
+    if (p === curPF) o.selected = true;
+    pfSel.appendChild(o);
+  });
 
   const filtered = pfSel.value === 'all' ? state.entries
     : state.entries.filter(e => e.platform === pfSel.value);
@@ -222,50 +289,79 @@ function setGain(valId, pctId, g) {
 }
 
 // -- Chart -------------------------------------------------
+
+// Build a series of cumulative totals, one value per date in `allDates`.
+// Walks `subset` once: for each entry we update a running map of "latest
+// value per (platform||stock)", then sum the map at every date boundary.
+// O(N + D) instead of the previous O(N * D).
+function buildSeries(subset, allDates) {
+  const sorted = [...subset].sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+  const latest = new Map();
+  let running = 0;
+  let cursor = 0;
+  const out = new Array(allDates.length);
+
+  for (let di = 0; di < allDates.length; di++) {
+    const d = allDates[di];
+    while (cursor < sorted.length && sorted[cursor].date <= d) {
+      const e = sorted[cursor++];
+      const k = e.platform + '||' + e.stock;
+      const prev = latest.get(k);
+      if (prev === undefined) { latest.set(k, e.value); running += e.value; }
+      else { running += (e.value - prev); latest.set(k, e.value); }
+    }
+    out[di] = Math.round(running);
+  }
+  return out;
+}
+
+function renderLegend(legendEl, datasets) {
+  legendEl.replaceChildren();
+  datasets.forEach(d => {
+    const item = document.createElement('span');
+    item.className = 'legend-item';
+    const dot = document.createElement('span');
+    dot.className = 'legend-dot';
+    dot.style.background = d.borderColor;
+    item.appendChild(dot);
+    item.appendChild(document.createTextNode(d.label));
+    legendEl.appendChild(item);
+  });
+}
+
 function renderChart(data, view) {
   const allDates = [...new Set(data.map(e => e.date))].sort();
+  const legend = document.getElementById('chart-legend');
   if (!allDates.length) {
     if (growthChart) { growthChart.destroy(); growthChart = null; }
-    document.getElementById('chart-legend').innerHTML = '';
+    legend.replaceChildren();
     return;
   }
 
-  const latestAt = (subset, d) => {
-    const combos = {};
-    subset.filter(e => e.date <= d).forEach(e => {
-      const k = e.platform + '||' + e.stock;
-      if (!combos[k] || e.date > combos[k].date) combos[k] = e;
-    });
-    return Object.values(combos).reduce((s, e) => s + e.value, 0);
-  };
-
   let datasets = [];
-  const legend = document.getElementById('chart-legend');
 
   if (view === 'total') {
     datasets = [{
-      label: 'Total', tension: 0, pointRadius: 3, borderWidth: 1.5,
-      data: allDates.map(d => Math.round(latestAt(data, d))),
+      label: 'Total value', tension: 0, pointRadius: 3, borderWidth: 1.5,
+      data: buildSeries(data, allDates),
       borderColor: '#4a90e2', backgroundColor: 'rgba(74,144,226,0.06)', fill: true
     }];
-    legend.innerHTML = `<span class="legend-item"><span class="legend-dot" style="background:#4a90e2"></span>Total value</span>`;
   } else {
-    const keys = view === 'platform'
-      ? [...new Set(data.map(e => e.platform))]
-      : [...new Set(data.map(e => e.stock))];
-    datasets = keys.map(k => {
-      const color  = colorFor(k);
-      const subset = data.filter(e => (view === 'platform' ? e.platform : e.stock) === k);
-      return {
-        label: k, tension: 0, pointRadius: 2, borderWidth: 1.5, fill: false,
-        data: allDates.map(d => Math.round(latestAt(subset, d))),
-        borderColor: color
-      };
+    const keyFn = view === 'platform' ? e => e.platform : e => e.stock;
+    const groups = new Map();
+    data.forEach(e => {
+      const k = keyFn(e);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(e);
     });
-    legend.innerHTML = datasets.map(d =>
-      `<span class="legend-item"><span class="legend-dot" style="background:${d.borderColor}"></span>${d.label}</span>`
-    ).join('');
+    datasets = [...groups.entries()].map(([k, subset]) => ({
+      label: k, tension: 0, pointRadius: 2, borderWidth: 1.5, fill: false,
+      data: buildSeries(subset, allDates),
+      borderColor: colorFor(k)
+    }));
   }
+
+  renderLegend(legend, datasets);
 
   if (growthChart) growthChart.destroy();
   growthChart = new Chart(document.getElementById('growth-chart'), {
@@ -525,32 +621,49 @@ function renderPositionsTable() {
 function renderHoldings() {
   const el = document.getElementById('holdings-list');
   if (!el) return;
-  if (!state.holdings.length) { el.innerHTML = '<div class="empty">No holdings yet.</div>'; return; }
+  el.replaceChildren();
+  if (!state.holdings.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No holdings yet.';
+    el.appendChild(empty);
+    return;
+  }
 
   const table = document.createElement('table');
   const thead = document.createElement('thead');
-  thead.innerHTML = '<tr><th>Platform</th><th>Ticker</th><th class="td-r">Shares</th><th class="td-r">Avg cost/share</th><th class="td-r">Cost basis</th><th></th></tr>';
+  const htr   = document.createElement('tr');
+  ['Platform','Ticker','Shares','Avg cost/share','Cost basis',''].forEach((label, i) => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    if (i >= 2 && i <= 4) th.className = 'td-r';
+    htr.appendChild(th);
+  });
+  thead.appendChild(htr);
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
   state.holdings.forEach(h => {
     const tr = document.createElement('tr');
-    const badge = `<span class="badge ${badgeClass(h.platform)}">${h.platform}</span>`;
-    const cb    = h.cost_basis ? fmtDec(h.cost_basis) : '--';
-    const total = h.cost_basis ? fmtDec(h.cost_basis * h.shares) : '--';
-    tr.innerHTML = `
-      <td>${badge}</td>
-      <td style="font-weight:500">${h.stock}</td>
-      <td class="td-r">${Number(h.shares).toLocaleString('en-US', { maximumFractionDigits: 4 })}</td>
-      <td class="td-r">${cb}</td>
-      <td class="td-r">${total}</td>
-      <td><button class="btn btn-sm btn-danger" data-id="${h.id}">Remove</button></td>
-    `;
-    tr.querySelector('button').addEventListener('click', () => deleteHolding(h.id));
+    tr.appendChild(tdNode(badgeEl(h.platform)));
+
+    const tickerTd = tdText(h.stock);
+    tickerTd.style.fontWeight = '500';
+    tr.appendChild(tickerTd);
+
+    tr.appendChild(tdText(Number(h.shares).toLocaleString('en-US', { maximumFractionDigits: 4 }), 'td-r'));
+    tr.appendChild(tdText(h.cost_basis ? fmtDec(h.cost_basis) : '--', 'td-r'));
+    tr.appendChild(tdText(h.cost_basis ? fmtDec(h.cost_basis * h.shares) : '--', 'td-r'));
+
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm btn-danger';
+    btn.textContent = 'Remove';
+    btn.addEventListener('click', () => deleteHolding(h.id));
+    tr.appendChild(tdNode(btn));
+
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
-  el.innerHTML = '';
   el.appendChild(table);
 }
 
@@ -604,33 +717,58 @@ async function renderTransactions() {
     const txns = await api('/transactions');
     const el   = document.getElementById('txn-history');
     if (!el) return;
-    if (!txns.length) { el.innerHTML = '<div class="empty">No transactions yet.</div>'; return; }
+    el.replaceChildren();
+    if (!txns.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No transactions yet.';
+      el.appendChild(empty);
+      return;
+    }
 
     const table = document.createElement('table');
     const thead = document.createElement('thead');
-    thead.innerHTML = '<tr><th>Date</th><th>Platform</th><th>Ticker</th><th>Action</th><th class="td-r">Shares</th><th class="td-r">Price/share</th><th class="td-r">Total</th><th></th></tr>';
+    const htr = document.createElement('tr');
+    ['Date','Platform','Ticker','Action','Shares','Price/share','Total',''].forEach((label, i) => {
+      const th = document.createElement('th');
+      th.textContent = label;
+      if (i >= 4 && i <= 6) th.className = 'td-r';
+      htr.appendChild(th);
+    });
+    thead.appendChild(htr);
     table.appendChild(thead);
 
     const tbody = document.createElement('tbody');
     txns.forEach(t => {
       const tr    = document.createElement('tr');
       const total = (t.shares * t.price_per_share).toFixed(2);
-      const color = t.action === 'buy' ? 'var(--green)' : 'var(--red)';
-      const badge = `<span class="badge ${badgeClass(t.platform)}">${t.platform}</span>`;
-      tr.innerHTML = `
-        <td>${t.date}</td><td>${badge}</td>
-        <td style="font-weight:500">${t.stock}</td>
-        <td style="color:${color};font-weight:500;text-transform:capitalize">${t.action}</td>
-        <td class="td-r">${Number(t.shares).toLocaleString('en-US', { maximumFractionDigits: 4 })}</td>
-        <td class="td-r">$${Number(t.price_per_share).toFixed(2)}</td>
-        <td class="td-r">$${Number(total).toLocaleString()}</td>
-        <td><button class="btn btn-sm btn-danger" data-id="${t.id}">Del</button></td>
-      `;
-      tr.querySelector('button').addEventListener('click', () => deleteTransaction(t.id));
+
+      tr.appendChild(tdText(t.date));
+      tr.appendChild(tdNode(badgeEl(t.platform)));
+
+      const tickerTd = tdText(t.stock);
+      tickerTd.style.fontWeight = '500';
+      tr.appendChild(tickerTd);
+
+      const actionTd = tdText(t.action);
+      actionTd.style.color = t.action === 'buy' ? 'var(--green)' : 'var(--red)';
+      actionTd.style.fontWeight = '500';
+      actionTd.style.textTransform = 'capitalize';
+      tr.appendChild(actionTd);
+
+      tr.appendChild(tdText(Number(t.shares).toLocaleString('en-US', { maximumFractionDigits: 4 }), 'td-r'));
+      tr.appendChild(tdText('$' + Number(t.price_per_share).toFixed(2), 'td-r'));
+      tr.appendChild(tdText('$' + Number(total).toLocaleString(), 'td-r'));
+
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-sm btn-danger';
+      btn.textContent = 'Del';
+      btn.addEventListener('click', () => deleteTransaction(t.id));
+      tr.appendChild(tdNode(btn));
+
       tbody.appendChild(tr);
     });
     table.appendChild(tbody);
-    el.innerHTML = '';
     el.appendChild(table);
   } catch (e) { console.error('renderTransactions:', e); }
 }
@@ -646,28 +784,49 @@ function renderRecent() {
   const recent = [...state.entries].sort((a, b) => a.date < b.date ? 1 : -1).slice(0, 10);
   const el     = document.getElementById('recent-list');
   if (!el) return;
-  if (!recent.length) { el.innerHTML = '<div class="empty">No entries yet.</div>'; return; }
+  el.replaceChildren();
+  if (!recent.length) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No entries yet.';
+    el.appendChild(empty);
+    return;
+  }
 
   const table = document.createElement('table');
   const thead = document.createElement('thead');
-  thead.innerHTML = '<tr><th>Date</th><th>Platform</th><th>Stock</th><th class="td-r">Value</th><th>Source</th><th></th></tr>';
+  const htr = document.createElement('tr');
+  ['Date','Platform','Stock','Value','Source',''].forEach((label, i) => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    if (i === 3) th.className = 'td-r';
+    htr.appendChild(th);
+  });
+  thead.appendChild(htr);
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
   recent.forEach(e => {
-    const tr    = document.createElement('tr');
-    const badge = `<span class="badge ${badgeClass(e.platform)}">${e.platform}</span>`;
-    tr.innerHTML = `
-      <td>${e.date}</td><td>${badge}</td><td>${e.stock}</td>
-      <td class="td-r">${fmtDec(e.value)}</td>
-      <td style="font-size:11px;color:var(--text3)">${e.auto_logged ? 'auto' : 'manual'}</td>
-      <td><button class="btn btn-sm btn-danger" data-id="${e.id}">Del</button></td>
-    `;
-    tr.querySelector('button').addEventListener('click', () => deleteEntry(e.id));
+    const tr = document.createElement('tr');
+    tr.appendChild(tdText(e.date));
+    tr.appendChild(tdNode(badgeEl(e.platform)));
+    tr.appendChild(tdText(e.stock));
+    tr.appendChild(tdText(fmtDec(e.value), 'td-r'));
+
+    const sourceTd = tdText(e.auto_logged ? 'auto' : 'manual');
+    sourceTd.style.fontSize = '11px';
+    sourceTd.style.color = 'var(--text3)';
+    tr.appendChild(sourceTd);
+
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm btn-danger';
+    btn.textContent = 'Del';
+    btn.addEventListener('click', () => deleteEntry(e.id));
+    tr.appendChild(tdNode(btn));
+
     tbody.appendChild(tr);
   });
   table.appendChild(tbody);
-  el.innerHTML = '';
   el.appendChild(table);
 }
 
@@ -703,39 +862,71 @@ async function deleteEntry(id) {
 }
 
 // -- History -----------------------------------------------
+function fillFilterSelect(sel, values, current) {
+  sel.replaceChildren();
+  const all = document.createElement('option');
+  all.value = 'all';
+  all.textContent = 'All';
+  sel.appendChild(all);
+  values.forEach(v => {
+    const o = document.createElement('option');
+    o.value = v;
+    o.textContent = v;
+    if (v === current) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
 function renderHistory() {
   const hpf  = document.getElementById('hist-platform');
   const hst  = document.getElementById('hist-stock');
-  const curP = hpf.value, curS = hst.value;
-
-  hpf.innerHTML = '<option value="all">All</option>' +
-    state.platforms.map(p => `<option value="${p}"${p === curP ? ' selected' : ''}>${p}</option>`).join('');
-  hst.innerHTML = '<option value="all">All</option>' +
-    state.stocks.map(s => `<option value="${s}"${s === curS ? ' selected' : ''}>${s}</option>`).join('');
+  fillFilterSelect(hpf, state.platforms, hpf.value);
+  fillFilterSelect(hst, state.stocks, hst.value);
 
   let filtered = [...state.entries].sort((a, b) => a.date < b.date ? 1 : -1);
   if (hpf.value !== 'all') filtered = filtered.filter(e => e.platform === hpf.value);
   if (hst.value !== 'all') filtered = filtered.filter(e => e.stock    === hst.value);
 
   const tbody = document.getElementById('hist-body');
-  if (!filtered.length) { tbody.innerHTML = '<tr><td colspan="8" class="empty">No entries match.</td></tr>'; return; }
+  tbody.replaceChildren();
+  if (!filtered.length) {
+    const tr = document.createElement('tr');
+    const td = tdText('No entries match.', 'empty');
+    td.colSpan = 8;
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
 
-  tbody.innerHTML = '';
   filtered.forEach(e => {
-    const tr    = document.createElement('tr');
-    const badge = `<span class="badge ${badgeClass(e.platform)}">${e.platform}</span>`;
-    const gain  = e.invested ? fmtGain(e.value - e.invested, null) : null;
-    const gainHtml = gain ? `<span class="${gain.cls}">${gain.dollar}</span>` : '--';
-    tr.innerHTML = `
-      <td>${e.date}</td><td>${badge}</td><td>${e.stock}</td>
-      <td class="td-r">${e.shares ? Number(e.shares).toFixed(4) : '--'}</td>
-      <td class="td-r">${e.price ? fmtDec(e.price) : '--'}</td>
-      <td class="td-r">${fmtDec(e.value)}</td>
-      <td class="td-r">${e.invested ? fmtDec(e.invested) : '--'}</td>
-      <td class="td-r">${gainHtml}</td>
-      <td><button class="btn btn-sm btn-danger" data-id="${e.id}">Del</button></td>
-    `;
-    tr.querySelector('button').addEventListener('click', () => { deleteEntry(e.id); setTimeout(renderHistory, 400); });
+    const tr = document.createElement('tr');
+    tr.appendChild(tdText(e.date));
+    tr.appendChild(tdNode(badgeEl(e.platform)));
+    tr.appendChild(tdText(e.stock));
+    tr.appendChild(tdText(e.shares ? Number(e.shares).toFixed(4) : '--', 'td-r'));
+    tr.appendChild(tdText(e.price ? fmtDec(e.price) : '--', 'td-r'));
+    tr.appendChild(tdText(fmtDec(e.value), 'td-r'));
+    tr.appendChild(tdText(e.invested ? fmtDec(e.invested) : '--', 'td-r'));
+
+    const gainTd = document.createElement('td');
+    gainTd.className = 'td-r';
+    if (e.invested) {
+      const g = fmtGain(e.value - e.invested, null);
+      const span = document.createElement('span');
+      span.className = g.cls;
+      span.textContent = g.dollar;
+      gainTd.appendChild(span);
+    } else {
+      gainTd.textContent = '--';
+    }
+    tr.appendChild(gainTd);
+
+    const btn = document.createElement('button');
+    btn.className = 'btn btn-sm btn-danger';
+    btn.textContent = 'Del';
+    btn.addEventListener('click', () => { deleteEntry(e.id); setTimeout(renderHistory, 400); });
+    tr.appendChild(tdNode(btn));
+
     tbody.appendChild(tr);
   });
 }
@@ -814,11 +1005,6 @@ function renderProjections() {
     </tr>
   `).join('');
 }
-
-// Init projections on load
-renderProjections();
-
-
 
 // -- Stock Analyzer ----------------------------------------
 
