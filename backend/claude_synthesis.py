@@ -298,58 +298,99 @@ Keep it brief and honest."""
 
 def synthesize_full_report(scores, portfolio_context=None):
     """
-    Generate all Claude-written sections of the report.
+    Generate all Claude-written sections in a single API call.
     Returns dict of section name -> text.
     """
     profile = scores["profile"]
+    q = scores["quality"]
+    v = scores["value"]
+    trap = scores["value_trap"]
+    flags = scores.get("red_flags", [])
+    insider = scores.get("insider", {})
+    data = scores.get("data_summary", {})
+
     print(f"[Claude] Generating report for {profile['name']}")
 
-    sections = {}
-
-    # Generate all sections (could parallelize but keeping sequential for simplicity)
-    try:
-        print("[Claude] Generating business section...")
-        sections["business"] = generate_business_section(profile, scores)
-    except Exception as e:
-        print(f"[Claude] Business section failed: {e}")
-        sections["business"] = f"{profile['name']} operates in the {profile['sector']} sector. " \
-                                f"Full description temporarily unavailable."
-
-    try:
-        print("[Claude] Generating quality narrative...")
-        sections["quality_narrative"] = generate_quality_narrative(scores)
-    except Exception as e:
-        print(f"[Claude] Quality narrative failed: {e}")
-        sections["quality_narrative"] = "Quality analysis complete. See individual signal scores above."
-
-    try:
-        print("[Claude] Generating value narrative...")
-        sections["value_narrative"] = generate_value_narrative(scores)
-    except Exception as e:
-        print(f"[Claude] Value narrative failed: {e}")
-        sections["value_narrative"] = "Valuation analysis complete. See individual signal scores above."
-
-    try:
-        print("[Claude] Generating verdict...")
-        sections["verdict"] = generate_verdict(scores, portfolio_context)
-    except Exception as e:
-        print(f"[Claude] Verdict failed: {e}")
-        sections["verdict"] = "Verdict generation temporarily unavailable. Please review scores above."
-
-    try:
-        print("[Claude] Generating learning section...")
-        sections["learning"] = generate_learning_section(scores)
-    except Exception as e:
-        print(f"[Claude] Learning section failed: {e}")
-        sections["learning"] = "Educational content temporarily unavailable."
-
+    flag_text = ", ".join([f["title"] for f in flags]) if flags else "None"
+    portfolio_text = ""
     if portfolio_context:
-        try:
-            print("[Claude] Generating portfolio fit...")
-            sections["portfolio_fit"] = generate_portfolio_fit(scores, portfolio_context)
-        except Exception as e:
-            print(f"[Claude] Portfolio fit failed: {e}")
-            sections["portfolio_fit"] = None
+        holdings = ", ".join([h["stock"] for h in portfolio_context[:8]])
+        portfolio_text = f"User current holdings: {holdings}"
 
-    print(f"[Claude] Report complete for {profile['name']}")
-    return sections
+    prompt = f"""You are analyzing {profile['name']} ({profile['symbol']}) for a beginner investor.
+
+SCORES (do not change these numbers):
+- Overall: {scores['overall_score']}/100
+- Quality: {q['score']}/100 (ROIC avg: {q['components']['roic'].get('avg_roic','N/A')}%, Gross margin avg: {q['components']['gross_margin'].get('avg_margin','N/A')}%, D/E: {q['components']['debt_safety'].get('debt_to_equity','N/A')})
+- Value: {v['score']}/100 (Normalized P/E: {v['components']['normalized_earnings'].get('current_pe_normalized','N/A')}x, FCF yield: {v['components']['fcf_yield'].get('fcf_yield_pct','N/A')}%, DCF discount: {v['components']['dcf'].get('discount_pct','N/A')}%)
+- Value trap risk: {trap['risk_level']}
+- Red flags: {flag_text}
+- Insider signal: {insider.get('signal','neutral')}
+- Sector: {profile.get('sector','Unknown')}
+{portfolio_text}
+
+Write exactly these 5 sections. Use the separator === SECTION === between each.
+
+=== BUSINESS ===
+3-4 sentences: what the company does, who pays them, what protects them from competition, biggest risk. Plain English, no jargon.
+
+=== QUALITY ===
+2-3 sentences explaining the quality score for a beginner. Reference the actual numbers above.
+
+=== VALUE ===
+2-3 sentences explaining the valuation for a beginner. Reference the actual numbers above.
+
+=== VERDICT ===
+Three paragraphs with bold headers:
+**The Bull Case** - argue genuinely for this investment (3-4 sentences)
+**The Bear Case** - argue strongly AGAINST this investment, do not soften it (3-4 sentences)
+**What Would Need to Be True** - specific conditions for success (2-3 sentences)
+End with one sentence noting this is educational analysis, not financial advice.
+
+=== LEARNING ===
+3 concepts from this analysis. For each use exactly:
+CONCEPT: [name]
+WHAT: [one sentence plain English explanation with analogy]
+WHY HERE: [one sentence specific to this company using actual data]"""
+
+    try:
+        response = claude_complete(prompt, SYSTEM_PROMPT, max_tokens=2000)
+        print(f"[Claude] Got response, length: {len(response)}")
+
+        # Parse sections
+        sections = {}
+        parts = response.split("===")
+        current = None
+        for part in parts:
+            part = part.strip()
+            if part in ["BUSINESS", "QUALITY", "VALUE", "VERDICT", "LEARNING"]:
+                current = part.lower()
+            elif current and part:
+                sections[current] = part.strip()
+                current = None
+
+        # Map to expected keys
+        result = {
+            "business": sections.get("business", f"{profile['name']} operates in the {profile['sector']} sector."),
+            "quality_narrative": sections.get("quality", "Quality analysis complete. See scores above."),
+            "value_narrative": sections.get("value", "Valuation analysis complete. See scores above."),
+            "verdict": sections.get("verdict", "Please review the scores above for the full analysis."),
+            "learning": sections.get("learning", ""),
+        }
+
+        if portfolio_context:
+            result["portfolio_fit"] = None  # Keep simple for now
+
+        print(f"[Claude] Sections generated: {list(result.keys())}")
+        return result
+
+    except Exception as e:
+        print(f"[Claude] Synthesis failed: {type(e).__name__}: {e}")
+        return {
+            "business": f"{profile['name']} operates in the {profile['sector']} sector. Analysis generation failed: {str(e)}",
+            "quality_narrative": "Quality analysis complete. See individual signal scores above.",
+            "value_narrative": "Valuation analysis complete. See individual signal scores above.",
+            "verdict": f"Analysis generation failed. Error: {str(e)}",
+            "learning": "",
+            "portfolio_fit": None
+        }
