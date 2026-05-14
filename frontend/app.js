@@ -17,8 +17,8 @@ let projChart   = null;
 
 // -- Init --------------------------------------------------
 document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('entry-date').value = today();
-  document.getElementById('txn-date').value   = today();
+  document.getElementById('bal-date').value = today();
+  document.getElementById('txn-date').value = today();
   if (sessionStorage.getItem('token')) showApp();
   renderProjections();
 });
@@ -178,7 +178,6 @@ async function loadAll() {
     state.holdings  = holdings;
     updateDataLists();
     renderDashboard();
-    renderRecent();
     renderHoldings();
     applyRefreshStatus(refreshStatus);
     updateRefreshInfo();
@@ -213,6 +212,7 @@ function switchTab(tab) {
   if (tab === 'history')     renderHistory();
   if (tab === 'projections') renderProjections();
   if (tab === 'holdings')    { renderHoldings(); renderTransactions(); }
+  if (tab === 'balances')    renderBalances();
   if (tab === 'analyze')     initAnalyzeTab();
 }
 
@@ -754,7 +754,12 @@ async function renderTransactions() {
     const tbody = document.createElement('tbody');
     txns.forEach(t => {
       const tr    = document.createElement('tr');
-      const total = (t.shares * t.price_per_share).toFixed(2);
+      // Shares are signed: positive = buy, negative = sell. Fall back to the
+      // legacy action field if a record predates the migration.
+      const signedShares = Number(t.shares);
+      const isBuy = t.action ? (t.action === 'buy') : (signedShares > 0);
+      const absShares = Math.abs(signedShares);
+      const total = (absShares * Number(t.price_per_share)).toFixed(2);
 
       tr.appendChild(tdText(t.date));
       tr.appendChild(tdNode(badgeEl(t.platform)));
@@ -763,13 +768,12 @@ async function renderTransactions() {
       tickerTd.style.fontWeight = '500';
       tr.appendChild(tickerTd);
 
-      const actionTd = tdText(t.action);
-      actionTd.style.color = t.action === 'buy' ? 'var(--green)' : 'var(--red)';
+      const actionTd = tdText(isBuy ? 'Buy' : 'Sell');
+      actionTd.style.color = isBuy ? 'var(--green)' : 'var(--red)';
       actionTd.style.fontWeight = '500';
-      actionTd.style.textTransform = 'capitalize';
       tr.appendChild(actionTd);
 
-      tr.appendChild(tdText(Number(t.shares).toLocaleString('en-US', { maximumFractionDigits: 4 }), 'td-r'));
+      tr.appendChild(tdText(absShares.toLocaleString('en-US', { maximumFractionDigits: 4 }), 'td-r'));
       tr.appendChild(tdText('$' + Number(t.price_per_share).toFixed(2), 'td-r'));
       tr.appendChild(tdText('$' + Number(total).toLocaleString(), 'td-r'));
 
@@ -792,80 +796,100 @@ async function deleteTransaction(id) {
   catch (e) { showToast('Failed', 3000); }
 }
 
-// -- Manual entry ------------------------------------------
-function renderRecent() {
-  const recent = [...state.entries].sort((a, b) => a.date < b.date ? 1 : -1).slice(0, 10);
-  const el     = document.getElementById('recent-list');
-  if (!el) return;
-  el.replaceChildren();
-  if (!recent.length) {
-    const empty = document.createElement('div');
-    empty.className = 'empty';
-    empty.textContent = 'No entries yet.';
-    el.appendChild(empty);
+
+async function submitBalance() {
+  const date     = document.getElementById('bal-date').value;
+  const platform = document.getElementById('bal-platform').value.trim();
+  const stock    = document.getElementById('bal-stock').value.trim().toUpperCase();
+  const shares   = document.getElementById('bal-shares').value;
+  const cost     = document.getElementById('bal-cost').value;
+  const value    = document.getElementById('bal-value').value;
+  const note     = document.getElementById('bal-note').value.trim();
+  if (!date || !platform || !stock || !shares) {
+    showToast('Fill in date, platform, ticker, shares');
     return;
   }
 
-  const table = document.createElement('table');
-  const thead = document.createElement('thead');
-  const htr = document.createElement('tr');
-  ['Date','Platform','Stock','Value','Source',''].forEach((label, i) => {
-    const th = document.createElement('th');
-    th.textContent = label;
-    if (i === 3) th.className = 'td-r';
-    htr.appendChild(th);
-  });
-  thead.appendChild(htr);
-  table.appendChild(thead);
-
-  const tbody = document.createElement('tbody');
-  recent.forEach(e => {
-    const tr = document.createElement('tr');
-    tr.appendChild(tdText(e.date));
-    tr.appendChild(tdNode(badgeEl(e.platform)));
-    tr.appendChild(tdText(e.stock));
-    tr.appendChild(tdText(fmtDec(e.value), 'td-r'));
-
-    const sourceTd = tdText(e.auto_logged ? 'auto' : 'manual');
-    sourceTd.style.fontSize = '11px';
-    sourceTd.style.color = 'var(--text3)';
-    tr.appendChild(sourceTd);
-
-    const btn = document.createElement('button');
-    btn.className = 'btn btn-sm btn-danger';
-    btn.textContent = 'Del';
-    btn.addEventListener('click', () => deleteEntry(e.id));
-    tr.appendChild(tdNode(btn));
-
-    tbody.appendChild(tr);
-  });
-  table.appendChild(tbody);
-  el.appendChild(table);
-}
-
-async function submitEntry() {
-  const date     = document.getElementById('entry-date').value;
-  const platform = document.getElementById('entry-platform').value.trim();
-  const stock    = document.getElementById('entry-stock').value.trim().toUpperCase();
-  const value    = document.getElementById('entry-value').value;
-  const invested = document.getElementById('entry-invested').value;
-  const notes    = document.getElementById('entry-notes').value.trim();
-  if (!date || !platform || !stock || !value) { showToast('Fill in date, platform, stock, value'); return; }
-
-  const btn = document.getElementById('entry-btn');
+  const btn = document.getElementById('bal-btn');
   btn.disabled = true; btn.textContent = 'Saving...';
   try {
-    await api('/entries', {
+    await api('/balances', {
       method: 'POST',
-      body: JSON.stringify({ date, platform, stock, value: Number(value), invested: invested ? Number(invested) : 0, notes })
+      body: JSON.stringify({
+        date, platform, stock,
+        shares:     Number(shares),
+        cost_basis: cost  ? Number(cost)  : 0,
+        value:      value ? Number(value) : null,
+        note,
+      }),
     });
-    document.getElementById('entry-value').value    = '';
-    document.getElementById('entry-invested').value = '';
-    document.getElementById('entry-notes').value    = '';
-    showToast('Entry saved');
+    document.getElementById('bal-shares').value = '';
+    document.getElementById('bal-cost').value   = '';
+    document.getElementById('bal-value').value  = '';
+    document.getElementById('bal-note').value   = '';
+    showToast('Balance saved');
     await loadAll();
-  } catch (e) { showToast('Failed: ' + e.message, 4000); }
-  btn.disabled = false; btn.textContent = 'Save entry';
+    renderBalances();
+  } catch (e) {
+    showToast('Failed: ' + e.message, 4000);
+  }
+  btn.disabled = false; btn.textContent = 'Save balance';
+}
+
+async function renderBalances() {
+  const el = document.getElementById('balances-list');
+  if (!el) return;
+  el.replaceChildren();
+  try {
+    const rows = await api('/balances');
+    if (!rows.length) {
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.textContent = 'No balances yet.';
+      el.appendChild(empty);
+      return;
+    }
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const htr   = document.createElement('tr');
+    ['Date','Platform','Ticker','Shares','Cost/share','Value',''].forEach((label, i) => {
+      const th = document.createElement('th');
+      th.textContent = label;
+      if (i >= 3 && i <= 5) th.className = 'td-r';
+      htr.appendChild(th);
+    });
+    thead.appendChild(htr);
+    table.appendChild(thead);
+    const tbody = document.createElement('tbody');
+    rows.forEach(b => {
+      const tr = document.createElement('tr');
+      tr.appendChild(tdText(b.date));
+      tr.appendChild(tdNode(badgeEl(b.platform)));
+      tr.appendChild(tdText(b.stock));
+      tr.appendChild(tdText(Number(b.shares).toLocaleString('en-US', { maximumFractionDigits: 4 }), 'td-r'));
+      tr.appendChild(tdText(b.cost_basis ? fmtDec(b.cost_basis) : '--', 'td-r'));
+      tr.appendChild(tdText(b.value ? fmtDec(b.value) : '--', 'td-r'));
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-sm btn-danger';
+      btn.textContent = 'Del';
+      btn.addEventListener('click', () => deleteBalance(b.id));
+      tr.appendChild(tdNode(btn));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    el.appendChild(table);
+  } catch (e) {
+    const err = document.createElement('div');
+    err.className = 'empty';
+    err.textContent = 'Could not load balances: ' + e.message;
+    el.appendChild(err);
+  }
+}
+
+async function deleteBalance(id) {
+  if (!confirm('Delete this balance entry?')) return;
+  try { await api('/balances/' + id, { method: 'DELETE' }); showToast('Deleted'); await loadAll(); renderBalances(); }
+  catch (e) { showToast('Failed: ' + e.message, 4000); }
 }
 
 async function deleteEntry(id) {

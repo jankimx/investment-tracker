@@ -43,7 +43,7 @@
     <div class="tabs">
       <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
       <button class="tab" data-tab="holdings" onclick="switchTab('holdings')">Holdings</button>
-      <button class="tab" data-tab="log" onclick="switchTab('log')">Log entry</button>
+      <button class="tab" data-tab="balances" onclick="switchTab('balances')">Balances</button>
       <button class="tab" data-tab="history" onclick="switchTab('history')">History</button>
       <button class="tab" data-tab="projections" onclick="switchTab('projections')">Projections</button>
       <button class="tab" data-tab="analyze" onclick="switchTab('analyze')">Analyze</button>
@@ -160,46 +160,50 @@
       </div>
     </div>
 
-    <!-- Log entry -->
-    <div id="tab-log" class="section">
+    <!-- Balances (for snapshot-tracked positions like 401k) -->
+    <div id="tab-balances" class="section">
       <div class="card">
-        <div class="card-title">Manual entry</div>
-        <p style="font-size:12px;color:var(--text2);margin-bottom:16px">For accounts that can't be auto-priced -- 401k, savings, etc.</p>
+        <div class="card-title">Record a balance</div>
+        <p style="font-size:12px;color:var(--text2);margin-bottom:16px">For accounts where you only have periodic statements -- 401k, HSA, target-date funds. Enter the snapshot from a statement.</p>
         <div class="form-grid">
           <div class="form-group">
             <label>Date</label>
-            <input type="date" id="entry-date" />
+            <input type="date" id="bal-date" />
           </div>
           <div class="form-group">
             <label>Platform</label>
-            <input type="text" id="entry-platform" placeholder="Fidelity 401k" list="dl-platform" autocomplete="off" />
+            <input type="text" id="bal-platform" placeholder="Jon - Fidelity 401k" list="dl-platform" autocomplete="off" />
             <datalist id="dl-platform"></datalist>
           </div>
           <div class="form-group">
-            <label>Asset</label>
-            <input type="text" id="entry-stock" placeholder="401k" list="dl-stock" autocomplete="off" />
+            <label>Ticker</label>
+            <input type="text" id="bal-stock" placeholder="FSELX" list="dl-stock" autocomplete="off" />
             <datalist id="dl-stock"></datalist>
           </div>
         </div>
-        <div class="form-grid-2">
+        <div class="form-grid">
           <div class="form-group">
-            <label>Current value ($)</label>
-            <input type="number" id="entry-value" placeholder="0.00" min="0" step="0.01" />
+            <label>Shares</label>
+            <input type="number" id="bal-shares" placeholder="382.549" min="0" step="0.0001" />
           </div>
           <div class="form-group">
-            <label>Amount invested ($) <span style="color:var(--text3)">optional</span></label>
-            <input type="number" id="entry-invested" placeholder="0.00" min="0" step="0.01" />
+            <label>Avg cost / share ($)</label>
+            <input type="number" id="bal-cost" placeholder="46.85" min="0" step="0.01" />
+          </div>
+          <div class="form-group">
+            <label>Reported value ($) <span style="color:var(--text3)">optional</span></label>
+            <input type="number" id="bal-value" placeholder="leave blank to derive" min="0" step="0.01" />
           </div>
         </div>
         <div class="form-group" style="margin-bottom:16px">
-          <label>Notes <span style="color:var(--text3)">optional</span></label>
-          <input type="text" id="entry-notes" placeholder="Any notes" />
+          <label>Note <span style="color:var(--text3)">optional</span></label>
+          <input type="text" id="bal-note" placeholder="e.g. Q2 2026 statement" />
         </div>
-        <button class="btn btn-primary" id="entry-btn" onclick="submitEntry()">Save entry</button>
+        <button class="btn btn-primary" id="bal-btn" onclick="submitBalance()">Save balance</button>
       </div>
       <div class="card">
-        <div class="card-title">Recent entries</div>
-        <div id="recent-list"><div class="empty">No entries yet.</div></div>
+        <div class="card-title">Recent balances</div>
+        <div id="balances-list"><div class="empty">No balances yet.</div></div>
       </div>
     </div>
 
