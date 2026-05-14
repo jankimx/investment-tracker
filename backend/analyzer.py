@@ -547,13 +547,16 @@ def score_normalized_earnings(income_statements, price_data):
 
     current_price = None
     if isinstance(price_data, list) and price_data:
-        current_price = price_data[0].get("price")
+        p = price_data[0]
+        current_price = p.get("price") or p.get("lastPrice") or p.get("close")
     elif isinstance(price_data, dict):
-        current_price = price_data.get("price")
+        current_price = price_data.get("price") or price_data.get("lastPrice") or price_data.get("close")
 
     if not current_price:
         return {"score": 15, "max": 30, "confidence": "low",
                 "note": "Could not determine current price"}
+    
+    current_price = float(current_price)
 
     # Get EPS over available years
     eps_values = []
@@ -637,16 +640,35 @@ def score_fcf_yield(cashflow_statements, price_data, balance_sheets):
     if isinstance(price_data, list) and price_data:
         p = price_data[0]
         current_price = p.get("price")
-        shares_outstanding = p.get("sharesOutstanding")
+        # FMP uses different field names depending on endpoint
+        shares_outstanding = (p.get("sharesOutstanding") or
+                              p.get("shares") or
+                              p.get("commonStockSharesOutstanding"))
+        # Try market cap directly if available
+        market_cap_direct = p.get("marketCap") or p.get("mktCap")
     elif isinstance(price_data, dict):
         current_price = price_data.get("price")
-        shares_outstanding = price_data.get("sharesOutstanding")
+        shares_outstanding = (price_data.get("sharesOutstanding") or
+                              price_data.get("shares") or
+                              price_data.get("commonStockSharesOutstanding"))
+        market_cap_direct = price_data.get("marketCap") or price_data.get("mktCap")
+    else:
+        market_cap_direct = None
 
-    if not current_price or not shares_outstanding:
+    if not current_price:
         return {"score": 15, "max": 30, "confidence": "low",
-                "note": "Could not determine market cap"}
+                "note": "Could not determine current price"}
 
-    market_cap = current_price * shares_outstanding
+    # Use direct market cap if available, otherwise calculate
+    if market_cap_direct:
+        market_cap = float(market_cap_direct)
+    elif shares_outstanding:
+        market_cap = float(current_price) * float(shares_outstanding)
+    else:
+        return {"score": 15, "max": 30, "confidence": "low",
+                "note": "Could not determine market cap - sharesOutstanding not available"}
+
+    current_price = float(current_price)
 
     # Calculate FCF for available years
     fcf_values = []
