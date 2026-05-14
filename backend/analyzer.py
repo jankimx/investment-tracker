@@ -60,11 +60,14 @@ def fetch_all_data(symbol):
 
     results = {}
     with ThreadPoolExecutor(max_workers=10) as executor:
-        futures = {
-            executor.submit(fetch, name, endpoint, params, base if len(t) < 4 else t[3]): name
-            for t in tasks
-            for name, endpoint, params, *base in [(t[0], t[1], t[2], t[3] if len(t) > 3 else FMP_BASE)]
-        }
+        futures = {}
+        for t in tasks:
+            name     = t[0]
+            endpoint = t[1]
+            params   = t[2]
+            base     = t[3] if len(t) > 3 else FMP_BASE
+            future   = executor.submit(fetch, name, endpoint, params, base)
+            futures[future] = name
         for future in as_completed(futures):
             name, data = future.result()
             results[name] = data
