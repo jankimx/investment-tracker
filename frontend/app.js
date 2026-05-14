@@ -262,8 +262,6 @@ function renderDashboard() {
     document.getElementById('m-daily').className = 'metric-value';
   }
 
-  setText('m-count', state.entries.length);
-
   // Platform filter
   const pfSel = document.getElementById('dash-platform');
   const curPF = pfSel.value;
