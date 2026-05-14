@@ -351,6 +351,131 @@ def refresh_status():
         "count":           m.get("count", 0)
     })
 
+# -- Stock Analyzer ---------------------------------------
+@app.route("/analyze/<symbol>", methods=["GET"])
+def analyze(symbol):
+    symbol = symbol.upper().strip()
+    force = request.args.get("refresh", "false").lower() == "true"
+
+    if not force:
+        cached = analyses.find_one({"symbol": symbol}, sort=[("analyzed_at", DESCENDING)])
+        if cached:
+            age_h = (datetime.utcnow() - datetime.fromisoformat(cached["analyzed_at"])).total_seconds() / 3600
+            if age_h < 24:
+                cached["id"] = str(cached.pop("_id"))
+                return jsonify({"cached": True, "age_hours": round(age_h, 1), "report": cached})
+
+    if not FMP_KEY:
+        return jsonify({"error": "FMP_API_KEY not configured"}), 503
+    if not CLAUDE_KEY:
+        return jsonify({"error": "ANTHROPIC_API_KEY not configured"}), 503
+
+    try:
+        from analyzer import analyze_stock
+        from claude_synthesis import synthesize_full_report
+
+        scores = analyze_stock(symbol)
+
+        portfolio_context = None
+        try:
+            all_entries = list(entries.find({}, sort=[("date", DESCENDING)]))
+            latest = {}
+            for e in all_entries:
+                k = e["platform"] + "||" + e["stock"]
+                if k not in latest:
+                    latest[k] = e
+            portfolio_context = [
+                {"platform": e["platform"], "stock": e["stock"],
+                 "value": e["value"], "shares": e.get("shares")}
+                for e in latest.values()
+            ]
+        except Exception as pe:
+            print(f"[Analyzer] Could not load portfolio context: {pe}")
+
+        narrative = synthesize_full_report(scores, portfolio_context)
+        report = {
+            "symbol": symbol,
+            "analyzed_at": datetime.utcnow().isoformat(),
+            "scores": scores,
+            "narrative": narrative,
+            "version": "1.0"
+        }
+        inserted = analyses.insert_one(dict(report))
+        report["id"] = str(inserted.inserted_id)
+        report.pop("_id", None)
+        return jsonify({"cached": False, "report": report})
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        print(f"[Analyzer] Failed for {symbol}: {e}")
+        return jsonify({"error": f"Analysis failed: {str(e)}"}), 500
+
+
+@app.route("/analyze/<symbol>/question", methods=["POST"])
+def ask_question(symbol):
+    symbol = symbol.upper().strip()
+    d = request.get_json() or {}
+    question = d.get("question", "").strip()
+    if not question:
+        return jsonify({"error": "No question provided"}), 400
+    cached = analyses.find_one({"symbol": symbol}, sort=[("analyzed_at", DESCENDING)])
+    if not cached:
+        return jsonify({"error": "Run an analysis first"}), 404
+    scores = cached.get("scores", {})
+    profile = scores.get("profile", {})
+    try:
+        from claude_synthesis import claude_complete, SYSTEM_PROMPT
+        prompt = f"A beginner investor is reading an analysis of {profile.get('name', symbol)} and has a question.
+
+Key facts (use only these):
+- Overall score: {scores.get('overall_score','N/A')}/100
+- Quality score: {scores.get('quality',{}).get('score','N/A')}/100
+- Value trap risk: {scores.get('value_trap',{}).get('risk_level','N/A')}
+- Sector: {profile.get('sector','N/A')}
+
+Question: {question}
+
+Answer in 2-4 sentences. Frame as educational context, not financial advice."
+        answer = claude_complete(prompt, SYSTEM_PROMPT, max_tokens=300)
+        return jsonify({"answer": answer, "symbol": symbol})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/recent-analyses", methods=["GET"])
+def recent_analyses():
+    pipeline = [
+        {"$sort": {"analyzed_at": -1}},
+        {"$group": {"_id": "$symbol", "latest": {"$first": "$$ROOT"}}},
+        {"$sort": {"latest.analyzed_at": -1}},
+        {"$limit": 12}
+    ]
+    out = []
+    for r in analyses.aggregate(pipeline):
+        doc = r["latest"]
+        out.append({
+            "symbol": doc.get("symbol"),
+            "company_name": doc.get("scores", {}).get("profile", {}).get("name"),
+            "overall_score": doc.get("scores", {}).get("overall_score"),
+            "verdict": doc.get("scores", {}).get("verdict"),
+            "analyzed_at": doc.get("analyzed_at"),
+        })
+    return jsonify(out)
+
+
+@app.route("/track-record", methods=["GET"])
+def track_record():
+    symbol = request.args.get("symbol", "").upper()
+    query = {"symbol": symbol} if symbol else {}
+    records = list(analyses.find(query, sort=[("analyzed_at", DESCENDING)]).limit(50))
+    out = [{"id": str(r["_id"]), "symbol": r.get("symbol"), "analyzed_at": r.get("analyzed_at"),
+            "overall_score": r.get("scores", {}).get("overall_score"),
+            "verdict": r.get("scores", {}).get("verdict"),
+            "company_name": r.get("scores", {}).get("profile", {}).get("name")} for r in records]
+    return jsonify({"records": out, "total": len(out)})
+
+
 # -- Health ------------------------------------------------
 @app.route("/health", methods=["GET"])
 def health():
