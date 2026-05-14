@@ -480,10 +480,7 @@ def get_positions():
     """Latest entry per (platform, stock). The dashboard's positions table
     needs exactly this; previously it was re-derived client-side from the
     full /entries dump."""
-    return jsonify([
-        {**e, "id": str(e.pop("_id"))} if "_id" in e else e
-        for e in latest_entries_per_position()
-    ])
+    return jsonify([serialize(e) for e in latest_entries_per_position()])
 
 CHART_DEFAULT_DAYS = 90
 CHART_MAX_DAYS     = 730
