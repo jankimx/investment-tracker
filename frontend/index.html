@@ -615,9 +615,9 @@ function renderDashboard() {
   document.getElementById('m-invested').textContent = fmt(summary.total_invested);
   const gain = summary.total_gain;
   const gainEl = document.getElementById('m-gain');
-  gainEl.textContent = (gain>=0?'+':'-') + '$' + Math.abs(Math.round(gain)).toLocaleString();
+  gainEl.textContent = (gain>=0?'+':'-') + '$' + Math.abs(gain).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
   gainEl.className = 'metric-value '+(gain>=0?'positive':'negative');
-  document.getElementById('m-gainpct').textContent = summary.total_invested>0?((gain/summary.total_invested)*100).toFixed(1)+'%':'';
+  document.getElementById('m-gainpct').textContent = summary.total_invested>0?((gain/summary.total_invested)*100).toFixed(2)+'%':'';
   document.getElementById('m-count').textContent = summary.entry_count;
 
   // Daily gain/loss
@@ -625,9 +625,9 @@ function renderDashboard() {
   const dailyPctEl = document.getElementById('m-dailypct');
   if (summary.daily_gain !== null && summary.daily_gain !== undefined) {
     const dg = summary.daily_gain;
-    dailyEl.textContent = (dg >= 0 ? '+' : '-') + '$' + Math.abs(Math.round(dg)).toLocaleString();
+    dailyEl.textContent = (dg >= 0 ? '+' : '-') + '$' + Math.abs(dg).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
     dailyEl.className = 'metric-value ' + (dg >= 0 ? 'positive' : 'negative');
-    dailyPctEl.textContent = summary.daily_gain_pct !== null ? (dg >= 0 ? '+' : '') + summary.daily_gain_pct + '%' : '';
+    dailyPctEl.textContent = summary.daily_gain_pct !== null ? (dg >= 0 ? '+' : '-') + Math.abs(summary.daily_gain_pct).toFixed(2) + '%' : '';
   } else {
     dailyEl.textContent = ' ';
     dailyEl.className = 'metric-value';
@@ -922,7 +922,7 @@ function renderPositionsTable() {
       td4.textContent = r.invested ? fmtDec(r.invested) : '--';
 
       const td7 = document.createElement('td');
-      td7.textContent = r.pctOfPortfolio.toFixed(1) + '%';
+      td7.textContent = r.pctOfPortfolio.toFixed(2) + '%';
 
       const gainCells = makeGainCells(r.totalGain, r.totalGainPct);
       const dailyCells = makeGainCells(r.dailyGain, r.dailyGainPct);
@@ -944,9 +944,9 @@ function renderPositionsTable() {
       const cls = val >= 0 ? 'pos-gain' : 'pos-loss';
       const sign = val >= 0 ? '+' : '-';
       td1.className = cls;
-      td1.textContent = sign + '$' + Math.abs(Math.round(val)).toLocaleString();
+      td1.textContent = sign + '$' + Math.abs(val).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2});
       td2.className = cls;
-      td2.textContent = pct !== null ? sign + Math.abs(pct).toFixed(1) + '%' : '';
+      td2.textContent = pct !== null ? sign + Math.abs(pct).toFixed(2) + '%' : '';
     }
     return [td1, td2];
   }
@@ -992,7 +992,7 @@ function renderPositionsTable() {
       const td4 = document.createElement('td'); td4.textContent = r.invested ? fmtDec(r.invested) : '--';
       const gainCells = makeGainCells(r.totalGain, r.totalGainPct);
       const dailyCells = makeGainCells(r.dailyGain, r.dailyGainPct);
-      const td7 = document.createElement('td'); td7.textContent = r.pctOfPortfolio.toFixed(1) + '%';
+      const td7 = document.createElement('td'); td7.textContent = r.pctOfPortfolio.toFixed(2) + '%';
       [td1, tdSpark, td3, td4, gainCells[0], gainCells[1], dailyCells[0], dailyCells[1], td7].forEach(function(td) { tr.appendChild(td); });
       return tr.outerHTML;
     }).join('');

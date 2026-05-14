@@ -146,7 +146,16 @@ def do_refresh_prices():
         price, prev_close, error = fetch_price(symbol)
         return h, symbol, price, prev_close, error
 
-    batches = [holdings[i:i+BATCH_SIZE] for i in range(0, len(holdings), BATCH_SIZE)]
+    # Sort by most recently known value descending so highest-value positions fetch first
+    def get_last_value(h):
+        last = entries_col.find_one(
+            {"platform": h["platform"], "stock": h["stock"]},
+            sort=[("date", DESCENDING)]
+        )
+        return last["value"] if last else 0
+
+    holdings_sorted = sorted(holdings, key=get_last_value, reverse=True)
+    batches = [holdings_sorted[i:i+BATCH_SIZE] for i in range(0, len(holdings_sorted), BATCH_SIZE)]
 
     for batch_num, batch in enumerate(batches):
         if batch_num > 0:
