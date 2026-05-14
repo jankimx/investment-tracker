@@ -426,7 +426,7 @@ def ask_question(symbol):
     profile = scores.get("profile", {})
     try:
         from claude_synthesis import claude_complete, SYSTEM_PROMPT
-        prompt = f"A beginner investor is reading an analysis of {profile.get('name', symbol)} and has a question.
+        prompt = f"""A beginner investor is reading an analysis of {profile.get('name', symbol)} and has a question.
 
 Key facts (use only these):
 - Overall score: {scores.get('overall_score','N/A')}/100
@@ -436,7 +436,7 @@ Key facts (use only these):
 
 Question: {question}
 
-Answer in 2-4 sentences. Frame as educational context, not financial advice."
+Answer in 2-4 sentences. Frame as educational context, not financial advice."""
         answer = claude_complete(prompt, SYSTEM_PROMPT, max_tokens=300)
         return jsonify({"answer": answer, "symbol": symbol})
     except Exception as e:
