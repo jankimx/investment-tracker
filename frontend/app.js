@@ -6,7 +6,8 @@ const REQUEST_TIMEOUT_MS = 60000; // analyzer can take 30-60s; everything else i
 
 // -- State -------------------------------------------------
 let state = {
-  entries: [], platforms: [], stocks: [],
+  entries: [], positions: [], chartRows: [],
+  platforms: [], stocks: [],
   summary: null, holdings: [], transactions: [],
   posGrouping: 'none', posSortCol: 'value', posSortDir: 1
 };
@@ -158,11 +159,19 @@ function showApp() {
 // -- Load --------------------------------------------------
 async function loadAll() {
   try {
-    const [entries, platforms, stocks, summary, holdings] = await Promise.all([
-      api('/entries'), api('/platforms'), api('/stocks'),
-      api('/summary'), api('/holdings')
+    const [entries, positions, chartData, platforms, stocks, summary, holdings, refreshStatus] = await Promise.all([
+      api('/entries?limit=200'),
+      api('/positions'),
+      api('/chart-data?days=90'),
+      api('/platforms'),
+      api('/stocks'),
+      api('/summary'),
+      api('/holdings'),
+      api('/refresh-status').catch(() => null),
     ]);
     state.entries   = entries;
+    state.positions = positions;
+    state.chartRows = (chartData && chartData.rows) || [];
     state.platforms = platforms;
     state.stocks    = stocks;
     state.summary   = summary;
@@ -171,7 +180,7 @@ async function loadAll() {
     renderDashboard();
     renderRecent();
     renderHoldings();
-    fetchRefreshStatus();
+    applyRefreshStatus(refreshStatus);
     updateRefreshInfo();
   } catch (e) {
     console.error('loadAll failed:', e);
@@ -208,19 +217,22 @@ function switchTab(tab) {
 }
 
 // -- Refresh status ----------------------------------------
-async function fetchRefreshStatus() {
-  try {
-    const s  = await api('/refresh-status');
-    const el = document.getElementById('refresh-status');
-    if (!el) return;
-    if (s.refreshed_today) {
-      const dt   = new Date(s.last_refresh + 'Z');
-      const time = dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-      el.innerHTML = `<span class="refresh-status-ok">Refreshed today at ${time}</span>`;
-    } else {
-      el.innerHTML = `<span class="refresh-status-pending">Not yet refreshed today</span>`;
-    }
-  } catch { /* silent */ }
+function applyRefreshStatus(s) {
+  const el = document.getElementById('refresh-status');
+  if (!el) return;
+  el.replaceChildren();
+  if (!s) return;
+  const span = document.createElement('span');
+  if (s.refreshed_today) {
+    const dt   = new Date(s.last_refresh + 'Z');
+    const time = dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    span.className   = 'refresh-status-ok';
+    span.textContent = `Refreshed today at ${time}`;
+  } else {
+    span.className   = 'refresh-status-pending';
+    span.textContent = 'Not yet refreshed today';
+  }
+  el.appendChild(span);
 }
 
 function updateRefreshInfo() {
@@ -278,8 +290,9 @@ function renderDashboard() {
     pfSel.appendChild(o);
   });
 
-  const filtered = pfSel.value === 'all' ? state.entries
-    : state.entries.filter(e => e.platform === pfSel.value);
+  const chartRows = state.chartRows || [];
+  const filtered = pfSel.value === 'all' ? chartRows
+    : chartRows.filter(e => e.platform === pfSel.value);
   renderChart(filtered, document.getElementById('dash-view').value);
   renderPositionsTable();
 }
@@ -406,9 +419,10 @@ function sortPositions(col) {
 function buildSparkline(platform, stock) {
   const pts = [];
   const seen = {};
-  state.entries.forEach(e => {
-    const k = e.platform + '||' + e.stock;
-    if (k === platform + '||' + stock && !seen[e.date]) {
+  // chartRows is the slim 90-day window; covers sparkline needs without
+  // shipping every historical entry the way state.entries used to.
+  (state.chartRows || []).forEach(e => {
+    if (e.platform === platform && e.stock === stock && !seen[e.date]) {
       seen[e.date] = true;
       pts.push({ date: e.date, value: e.value });
     }
@@ -433,40 +447,31 @@ function buildSparkline(platform, stock) {
 }
 
 function buildPositionRows() {
-  const latest = {};
-  const prev   = {};
-  const allDates = [...new Set(state.entries.map(e => e.date))].sort().reverse();
-  const todayDate = allDates[0];
-  const prevDate  = allDates[1];
-
-  state.entries.forEach(e => {
-    const k = e.platform + '||' + e.stock;
-    if (e.date === todayDate && !latest[k]) latest[k] = e;
-    if (prevDate && e.date === prevDate && !prev[k]) prev[k] = e;
-  });
+  // Source of truth for "what positions exist right now" = holdings, not
+  // entries. Filtering against this set hides ghost rows for positions you
+  // no longer hold (the entries history sticks around but stops rendering).
+  const liveKeys = new Set(
+    state.holdings.map(h => (h.platform || '') + '||' + (h.stock || '').toUpperCase())
+  );
 
   const totalValue = state.summary?.total_value || 1;
+  const positions  = state.positions || [];
 
-  return Object.values(latest).map(e => {
-    const p = prev[e.platform + '||' + e.stock];
-    const dailyGain    = e.daily_gain !== undefined && e.daily_gain !== null ? e.daily_gain
-                       : (p ? e.value - p.value : null);
-    const dailyGainPct = e.daily_gain_pct !== undefined && e.daily_gain_pct !== null ? e.daily_gain_pct
-                       : (p && p.value > 0 ? (dailyGain / p.value * 100) : null);
-    return {
-      platform:      e.platform,
-      stock:         e.stock,
-      value:         e.value,
-      invested:      e.invested || 0,
-      shares:        e.shares || null,
-      price:         e.price || null,
-      totalGain:     e.invested ? e.value - e.invested : null,
-      totalGainPct:  (e.invested && e.invested > 0) ? ((e.value - e.invested) / e.invested * 100) : null,
-      dailyGain,
-      dailyGainPct,
-      pctOfPortfolio: (e.value / totalValue * 100)
-    };
-  });
+  return positions
+    .filter(e => liveKeys.has((e.platform || '') + '||' + (e.stock || '').toUpperCase()))
+    .map(e => ({
+      platform:       e.platform,
+      stock:          e.stock,
+      value:          e.value,
+      invested:       e.invested || 0,
+      shares:         e.shares || null,
+      price:          e.price || null,
+      totalGain:      e.invested ? e.value - e.invested : null,
+      totalGainPct:   (e.invested && e.invested > 0) ? ((e.value - e.invested) / e.invested * 100) : null,
+      dailyGain:      e.daily_gain ?? null,
+      dailyGainPct:   e.daily_gain_pct ?? null,
+      pctOfPortfolio: (e.value / totalValue * 100),
+    }));
 }
 
 function sortRows(rows) {
@@ -563,7 +568,7 @@ function buildAggregateTr(label, groupKey, grp, totalValue) {
 
 function renderPositionsTable() {
   const container = document.getElementById('positions-container');
-  if (!container || !state.entries.length) return;
+  if (!container || !(state.positions || []).length) return;
 
   const { posSortCol, posSortDir, posGrouping } = state;
   const totalValue = state.summary?.total_value || 1;
@@ -841,7 +846,7 @@ function renderRecent() {
 async function submitEntry() {
   const date     = document.getElementById('entry-date').value;
   const platform = document.getElementById('entry-platform').value.trim();
-  const stock    = document.getElementById('entry-stock').value.trim();
+  const stock    = document.getElementById('entry-stock').value.trim().toUpperCase();
   const value    = document.getElementById('entry-value').value;
   const invested = document.getElementById('entry-invested').value;
   const notes    = document.getElementById('entry-notes').value.trim();
@@ -939,9 +944,17 @@ function renderHistory() {
   });
 }
 
-function exportCSV() {
+async function exportCSV() {
+  // state.entries is capped at 200 for page-load performance; fetch the full
+  // history (up to the API's hard cap) only when the user explicitly exports.
+  let allEntries = state.entries;
+  try {
+    allEntries = await api('/entries?limit=2000');
+  } catch (e) {
+    showToast('Export using cached entries only', 3000);
+  }
   const rows = [['Date','Platform','Stock','Shares','Price','Value','Invested','Gain/Loss','Auto']];
-  state.entries.forEach(e => {
+  allEntries.forEach(e => {
     const gain = e.invested ? (e.value - e.invested).toFixed(2) : '';
     rows.push([e.date, e.platform, e.stock, e.shares || '', e.price || '', e.value, e.invested || '', gain, e.auto_logged ? 'yes' : 'no']);
   });

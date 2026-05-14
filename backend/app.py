@@ -56,6 +56,17 @@ try:
 except Exception as e:
     print(f"[Startup] Index warning: {e}")
 
+# Unique constraints on logical keys. Wrapped separately so existing duplicates
+# log a warning (and the app keeps booting) instead of crashing.
+for spec, coll, name in [
+    ([("platform", 1), ("stock", 1)], holdings, "holdings_unique"),
+    ([("date", 1), ("platform", 1), ("stock", 1)], entries, "entries_unique"),
+]:
+    try:
+        coll.create_index(spec, unique=True, name=name)
+    except Exception as e:
+        print(f"[Startup] Could not create unique index {name} (likely existing duplicate data): {e}")
+
 # -- Helpers -----------------------------------------------
 def serialize(doc):
     doc["id"] = str(doc.pop("_id"))
@@ -315,12 +326,33 @@ def upsert_holding():
     for f in ["platform", "stock", "shares"]:
         if f not in d:
             return jsonify({"error": f"Missing: {f}"}), 400
-    d["shares"]     = float(d["shares"])
-    d["cost_basis"] = float(d.get("cost_basis", 0))
-    d["updated_at"] = datetime.utcnow().isoformat()
+    platform   = d["platform"]
+    stock      = d["stock"].upper()
+    shares     = float(d["shares"])
+    cost_basis = float(d.get("cost_basis", 0))
+    now_iso    = datetime.utcnow().isoformat()
+
+    # If this is a brand-new position (no transactions logged yet), drop a
+    # synthetic "initial position" buy so the transaction log stays complete.
+    # If transactions already exist, the user is correcting an existing
+    # holding -- leave the log alone.
+    has_history = txns.count_documents({"platform": platform, "stock": stock}, limit=1) > 0
+    if shares > 0 and not has_history:
+        txns.insert_one({
+            "platform": platform, "stock": stock, "action": "buy",
+            "shares": shares, "price_per_share": cost_basis,
+            "date": datetime.utcnow().strftime("%Y-%m-%d"),
+            "created_at": now_iso,
+            "synthetic": True,
+            "note": "Initial position seeded from holdings upsert",
+        })
+
     holdings.update_one(
-        {"platform": d["platform"], "stock": d["stock"]},
-        {"$set": d}, upsert=True
+        {"platform": platform, "stock": stock},
+        {"$set": {"platform": platform, "stock": stock,
+                  "shares": shares, "cost_basis": cost_basis,
+                  "updated_at": now_iso}},
+        upsert=True
     )
     return jsonify({"ok": True}), 201
 
@@ -342,6 +374,41 @@ def get_transactions():
     if request.args.get("stock"):    q["stock"]    = request.args["stock"]
     return jsonify([serialize(t) for t in txns.find(q).sort("date", DESCENDING)])
 
+def recompute_holding(platform, stock):
+    """Rebuild holdings.shares + cost_basis for (platform, stock) from the full
+    transaction history. Buys add shares and roll into a weighted average cost
+    basis; sells subtract shares and leave cost basis untouched. If no
+    transactions remain, the holding is removed entirely."""
+    history = list(txns.find(
+        {"platform": platform, "stock": stock}
+    ).sort("date", ASCENDING))
+
+    if not history:
+        holdings.delete_one({"platform": platform, "stock": stock})
+        return
+
+    shares = 0.0
+    cost_basis = 0.0
+    for t in history:
+        s = float(t.get("shares", 0))
+        p = float(t.get("price_per_share", 0))
+        if t.get("action") == "buy":
+            new_shares = shares + s
+            cost_basis = ((shares * cost_basis) + (s * p)) / new_shares if new_shares > 0 else p
+            shares = new_shares
+        else:  # sell
+            shares = max(0.0, shares - s)
+            # cost basis unchanged on sells (avg-cost convention)
+
+    holdings.update_one(
+        {"platform": platform, "stock": stock},
+        {"$set": {"platform": platform, "stock": stock,
+                  "shares": round(shares, 6),
+                  "cost_basis": round(cost_basis, 4),
+                  "updated_at": datetime.utcnow().isoformat()}},
+        upsert=True
+    )
+
 @app.route("/transactions", methods=["POST"])
 @require_auth
 def add_transaction():
@@ -360,26 +427,7 @@ def add_transaction():
     txns.insert_one({"platform": platform, "stock": stock, "action": action,
                      "shares": shares, "price_per_share": pps, "date": date,
                      "created_at": datetime.utcnow().isoformat()})
-
-    existing = holdings.find_one({"platform": platform, "stock": stock})
-    if existing:
-        old_shares = float(existing.get("shares", 0))
-        old_cost   = float(existing.get("cost_basis", 0))
-        if action == "buy":
-            new_shares = old_shares + shares
-            new_cost   = ((old_shares * old_cost) + (shares * pps)) / new_shares if new_shares > 0 else pps
-        else:
-            new_shares = max(0, old_shares - shares)
-            new_cost   = old_cost
-        holdings.update_one(
-            {"platform": platform, "stock": stock},
-            {"$set": {"shares": round(new_shares, 6), "cost_basis": round(new_cost, 4),
-                      "updated_at": datetime.utcnow().isoformat()}}
-        )
-    else:
-        holdings.insert_one({"platform": platform, "stock": stock,
-                              "shares": shares, "cost_basis": pps,
-                              "updated_at": datetime.utcnow().isoformat()})
+    recompute_holding(platform, stock)
     return jsonify({"ok": True}), 201
 
 @app.route("/transactions/<tid>", methods=["DELETE"])
@@ -388,17 +436,76 @@ def delete_transaction(tid):
     oid = safe_object_id(tid)
     if oid is None:
         return jsonify({"error": "Invalid id"}), 400
+    # Capture the position the transaction was attached to BEFORE deleting,
+    # so we know which holding to recompute afterwards.
+    t = txns.find_one({"_id": oid})
+    if not t:
+        return jsonify({"ok": True})  # already gone
     txns.delete_one({"_id": oid})
+    recompute_holding(t["platform"], t["stock"])
     return jsonify({"ok": True})
 
 # -- Entries -----------------------------------------------
+ENTRIES_DEFAULT_LIMIT = 200
+ENTRIES_MAX_LIMIT     = 2000
+
 @app.route("/entries", methods=["GET"])
 @require_auth
 def get_entries():
+    """Paginated list of entries, newest first.
+
+    Query params:
+        platform, stock  -- optional filters
+        limit            -- max rows to return (default 200, hard cap 2000)
+        before           -- only entries with date strictly less than this
+                            YYYY-MM-DD (used to page backwards in time)
+    """
     q = {}
     if request.args.get("platform"): q["platform"] = request.args["platform"]
     if request.args.get("stock"):    q["stock"]    = request.args["stock"]
-    return jsonify([serialize(e) for e in entries.find(q).sort("date", DESCENDING)])
+    if request.args.get("before"):   q["date"]     = {"$lt": request.args["before"]}
+
+    try:
+        limit = int(request.args.get("limit", ENTRIES_DEFAULT_LIMIT))
+    except ValueError:
+        limit = ENTRIES_DEFAULT_LIMIT
+    limit = max(1, min(limit, ENTRIES_MAX_LIMIT))
+
+    cursor = entries.find(q).sort("date", DESCENDING).limit(limit)
+    return jsonify([serialize(e) for e in cursor])
+
+@app.route("/positions", methods=["GET"])
+@require_auth
+def get_positions():
+    """Latest entry per (platform, stock). The dashboard's positions table
+    needs exactly this; previously it was re-derived client-side from the
+    full /entries dump."""
+    return jsonify([
+        {**e, "id": str(e.pop("_id"))} if "_id" in e else e
+        for e in latest_entries_per_position()
+    ])
+
+CHART_DEFAULT_DAYS = 90
+CHART_MAX_DAYS     = 730
+
+@app.route("/chart-data", methods=["GET"])
+@require_auth
+def get_chart_data():
+    """Slim time series for the dashboard chart. Returns only the fields the
+    chart actually consumes (date, platform, stock, value), filtered by
+    a sliding window so we don't ship years of history on page load."""
+    try:
+        days = int(request.args.get("days", CHART_DEFAULT_DAYS))
+    except ValueError:
+        days = CHART_DEFAULT_DAYS
+    days = max(1, min(days, CHART_MAX_DAYS))
+
+    since = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
+    cursor = entries.find(
+        {"date": {"$gte": since}},
+        {"_id": 0, "date": 1, "platform": 1, "stock": 1, "value": 1},
+    ).sort("date", ASCENDING)
+    return jsonify({"since": since, "days": days, "rows": list(cursor)})
 
 @app.route("/entries", methods=["POST"])
 @require_auth
@@ -407,6 +514,7 @@ def add_entry():
     for f in ["date", "platform", "stock", "value"]:
         if f not in d:
             return jsonify({"error": f"Missing: {f}"}), 400
+    d["stock"]      = d["stock"].upper()
     d["value"]      = float(d["value"])
     d["invested"]   = float(d.get("invested", 0))
     d["created_at"] = datetime.utcnow().isoformat()
