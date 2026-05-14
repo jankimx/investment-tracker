@@ -569,13 +569,35 @@ def score_normalized_earnings(income_statements, price_data):
         return {"score": 15, "max": 30, "confidence": "low",
                 "note": "EPS data unavailable"}
 
-    normalized_eps = sum(eps_values) / len(eps_values)
-    current_pe = current_price / normalized_eps if normalized_eps > 0 else 999
     years = len(eps_values)
 
-    # Historical P/E context - what was the average over the period?
-    # We use a simplified approach: if we have enough years, calculate avg P/E
-    # For now score based on absolute normalized P/E levels
+    # Detect high-growth companies where 10yr average is misleading
+    # If recent EPS is 3x+ the oldest EPS, company has grown significantly
+    consistent_growth = False
+    if len(eps_values) >= 5 and eps_values[-1] > 0:
+        growth_multiple = eps_values[0] / eps_values[-1]
+        consistent_growth = growth_multiple >= 2.5
+
+    # For high-growth companies use 5-year average, otherwise 10-year
+    if consistent_growth and len(eps_values) >= 5:
+        normalized_eps = sum(eps_values[:5]) / 5
+        normalization_note = "5-year average used (consistent growth makes 10-yr average misleading)"
+    else:
+        normalized_eps = sum(eps_values) / len(eps_values)
+        normalization_note = f"{years}-year average"
+
+    current_pe = current_price / normalized_eps if normalized_eps > 0 else 999
+
+    # Check for business model change - if EPS variance is very high,
+    # normalized earnings may be less meaningful
+    if len(eps_values) >= 5:
+        avg = sum(eps_values) / len(eps_values)
+        variance = sum((v - avg) ** 2 for v in eps_values) / len(eps_values)
+        cv = (variance ** 0.5) / avg if avg > 0 else 0
+        business_changed_flag = cv > 0.5
+    else:
+        business_changed_flag = False
+
     if current_pe < 10:
         score = 28
         valuation = "Very cheap vs normalized earnings"
@@ -616,9 +638,11 @@ def score_normalized_earnings(income_statements, price_data):
         "current_price": round(current_price, 2),
         "years_of_data": years,
         "valuation": valuation,
-        "business_changed_flag": business_changed_flag,
-        "caveat": "Business model may have changed significantly" if business_changed_flag else None,
-        "note": f"Normalized P/E of {current_pe:.1f}x based on {years}-year average EPS of ${normalized_eps:.2f}"
+        "business_changed_flag": business_changed_flag or consistent_growth,
+        "caveat": ("5-year average used instead of 10-year because this company has grown EPS significantly -- "
+                   "the long-term average would understate true earnings power.") if consistent_growth else (
+                   "Business model may have changed significantly" if business_changed_flag else None),
+        "note": f"Normalized P/E of {current_pe:.1f}x based on {normalization_note}, EPS ${normalized_eps:.2f}"
     }
 
 
