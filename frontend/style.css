@@ -113,7 +113,7 @@ body {
 }
 .select-wrap select:focus { outline: none; border-color: var(--blue); }
 .select-wrap::after {
-  content: "&#9660;"; position: absolute; right: 9px; top: 50%;
+  content: "\25BC"; position: absolute; right: 9px; top: 50%;
   transform: translateY(-50%); pointer-events: none;
   color: var(--text3); font-size: 9px;
 }
