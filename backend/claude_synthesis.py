@@ -37,10 +37,23 @@ def claude_complete(prompt, system, max_tokens=1500):
 
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            data = json.loads(r.read().decode())
-            return data["content"][0]["text"]
+            raw = r.read().decode()
+            data = json.loads(raw)
+            print(f"[Claude] Response keys: {list(data.keys())}")
+            if "content" in data:
+                return data["content"][0]["text"]
+            elif "error" in data:
+                print(f"[Claude] API error response: {data['error']}")
+                raise ValueError(f"Claude API error: {data['error']}")
+            else:
+                print(f"[Claude] Unexpected response: {raw[:200]}")
+                raise ValueError("Unexpected Claude API response")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        print(f"[Claude] HTTP {e.code} error: {body[:300]}")
+        raise
     except Exception as e:
-        print(f"[Claude] API error: {e}")
+        print(f"[Claude] API error: {type(e).__name__}: {e}")
         raise
 
 
