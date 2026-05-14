@@ -75,12 +75,18 @@ def do_refresh():
     results = []
     errors  = []
 
-    # Sort by last known value descending — most important positions first
-    def last_value(h):
-        e = entries.find_one({"platform": h["platform"], "stock": h["stock"]}, sort=[("date", DESCENDING)])
-        return e["value"] if e else 0
+    # Sort by last known value descending — fetch all values in one query
+    last_entries = {}
+    for e in entries.find({}, sort=[("date", DESCENDING)]):
+        k = e["platform"] + "||" + e["stock"]
+        if k not in last_entries:
+            last_entries[k] = e["value"]
 
-    sorted_holdings = sorted(all_holdings, key=last_value, reverse=True)
+    sorted_holdings = sorted(
+        all_holdings,
+        key=lambda h: last_entries.get(h["platform"] + "||" + h["stock"], 0),
+        reverse=True
+    )
 
     # Fetch one at a time with delay to respect rate limits
     # Alpha Vantage free: 5 req/min, 25 req/day
@@ -128,7 +134,7 @@ def do_refresh():
     if results:
         et_tz   = pytz.timezone("America/New_York")
         et_time = pytz.utc.localize(now_utc).astimezone(et_tz)
-        send_sms(et_time.strftime("%-I:%M %p"))
+        send_sms(et_time.strftime("%I:%M %p").lstrip("0"))
 
     print(f"[Refresh] Done: {len(results)} refreshed, {len(errors)} errors")
     return {"refreshed": len(results), "results": results, "errors": errors, "date": today}
