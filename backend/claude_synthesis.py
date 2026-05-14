@@ -9,7 +9,7 @@ import json
 import urllib.request
 
 CLAUDE_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-CLAUDE_MODEL = "claude-sonnet-4-5"
+CLAUDE_MODEL = "claude-sonnet-4-6"
 
 
 def claude_complete(prompt, system, max_tokens=1500):
