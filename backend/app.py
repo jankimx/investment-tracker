@@ -330,23 +330,26 @@ def _fetch_one_price(symbol):
 
 def fetch_prices_batch(symbols):
     """Fetch current prices for many symbols in parallel.
-    Returns (prices_by_symbol, error). prices_by_symbol maps SYM -> float price.
-    On total config failure returns ({}, error_message); per-symbol failures
-    are not surfaced here (caller iterates over `symbols` to detect missing)."""
+    Returns (prices_by_symbol, errors_by_symbol, top_level_error).
+    - prices_by_symbol: SYM -> float price (only successful fetches)
+    - errors_by_symbol: SYM -> error string (only failed fetches)
+    - top_level_error: set only on config failures (e.g. no FMP_KEY)."""
     if not FMP_KEY:
-        return {}, "FMP_API_KEY not configured"
+        return {}, {}, "FMP_API_KEY not configured"
     if not symbols:
-        return {}, None
-    out = {}
+        return {}, {}, None
+    out_prices = {}
+    out_errors = {}
     with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [executor.submit(_fetch_one_price, s) for s in symbols]
         for fut in as_completed(futures):
             sym, price, err = fut.result()
             if price is not None:
-                out[sym] = price
-            elif err:
+                out_prices[sym] = price
+            else:
+                out_errors[sym] = err or "Unknown error"
                 print(f"[Refresh] {sym} fetch error: {err}")
-    return out, None
+    return out_prices, out_errors, None
 
 def do_refresh(notify=False):
     """Fetch latest price for every distinct symbol we track and upsert
@@ -362,7 +365,7 @@ def do_refresh(notify=False):
     if not symbols:
         return {"refreshed": 0, "errors": [], "date": today}
 
-    prices_by_sym, batch_err = fetch_prices_batch(symbols)
+    prices_by_sym, errors_by_sym, batch_err = fetch_prices_batch(symbols)
     if batch_err:
         print(f"[Refresh] Batch fetch failed: {batch_err}")
         errors.append({"stock": "*", "error": batch_err})
@@ -371,7 +374,7 @@ def do_refresh(notify=False):
         for symbol in symbols:
             price = prices_by_sym.get(symbol)
             if price is None:
-                errors.append({"stock": symbol, "error": "No price returned by FMP"})
+                errors.append({"stock": symbol, "error": errors_by_sym.get(symbol, "No price returned by FMP")})
                 continue
             prices.update_one(
                 {"symbol": symbol, "date": today},
