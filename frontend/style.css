@@ -163,6 +163,12 @@ body {
 .pos-table tr:last-child td { border-bottom: none; }
 .pos-table tr:hover td { background: var(--bg2); }
 
+/* Robinhood-style tick flash: brief green/red tint when a value changes. */
+@keyframes flash-up   { 0% { background-color: rgba(35,209,96,0.45); } 100% { background-color: transparent; } }
+@keyframes flash-down { 0% { background-color: rgba(235,77,75,0.45); } 100% { background-color: transparent; } }
+.flash-up   { animation: flash-up   700ms ease-out; }
+.flash-down { animation: flash-down 700ms ease-out; }
+
 .badge {
   display: inline-block; padding: 2px 7px; border-radius: 4px;
   font-size: 10px; font-weight: 500; white-space: nowrap;

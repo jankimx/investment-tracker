@@ -344,6 +344,7 @@ function renderDashboard() {
   if (!s) return;
 
   setText('m-total',    fmtDec(s.total_value));
+  applyTickFlash(document.getElementById('m-total'), 'dashboard::total', s.total_value);
   setText('m-invested', fmtDec(s.total_invested));
 
   const tg = fmtGain(s.total_gain, s.total_invested > 0 ? (s.total_gain / s.total_invested * 100) : null);
@@ -606,6 +607,7 @@ function buildTr(r) {
   tdSpark.innerHTML = buildSparkline(r.platform, r.stock);
 
   const tdVal = document.createElement('td'); tdVal.className = 'td-r'; tdVal.textContent = fmtDec(r.value);
+  applyTickFlash(tdVal, posRowKey(r.platform, r.stock), r.value);
   const tdInv = document.createElement('td'); tdInv.className = 'td-r'; tdInv.textContent = r.invested ? fmtDec(r.invested) : '--';
   const tdPct = document.createElement('td'); tdPct.className = 'td-r'; tdPct.textContent = r.pctOfPortfolio.toFixed(2) + '%';
 
@@ -614,6 +616,24 @@ function buildTr(r) {
 
   [tdBadge, tdStock, tdSpark, tdVal, tdInv, tdTG, tdTGP, tdDG, tdDGP, tdPct].forEach(td => tr.appendChild(td));
   return tr;
+}
+
+// -- Tick flash --------------------------------------------
+// Robinhood-style: when a row's value changes between renders, briefly tint
+// the Value cell green (up) or red (down). prevValues is module-scoped, not
+// in state, so sort/grouping re-renders use the same prior reference.
+const _prevValues = new Map();
+const posRowKey = (platform, stock) => `${platform || ''}::${(stock || '').toUpperCase()}`;
+
+function applyTickFlash(cell, key, newValue) {
+  if (newValue == null) return;
+  const prev = _prevValues.get(key);
+  _prevValues.set(key, newValue);
+  if (prev == null || prev === newValue) return;
+  cell.classList.add(newValue > prev ? 'flash-up' : 'flash-down');
+  // CSS keyframes drive the fade; clean the class up after the animation
+  // finishes so the next change re-triggers it.
+  setTimeout(() => cell.classList.remove('flash-up', 'flash-down'), 800);
 }
 
 function buildAggregateTr(label, groupKey, grp, totalValue) {
@@ -640,6 +660,7 @@ function buildAggregateTr(label, groupKey, grp, totalValue) {
   }
 
   const tdVal = document.createElement('td'); tdVal.className = 'td-r'; tdVal.textContent = fmtDec(value);
+  applyTickFlash(tdVal, `agg::${groupKey}::${label}`, value);
   const tdInv = document.createElement('td'); tdInv.className = 'td-r'; tdInv.textContent = invested ? fmtDec(invested) : '--';
   const tdPct = document.createElement('td'); tdPct.className = 'td-r'; tdPct.textContent = pct.toFixed(2) + '%';
 
