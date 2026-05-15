@@ -19,7 +19,7 @@ There is no test suite, lint config, or package manager for the frontend.
 
 ### Two key data flows
 
-1. **Portfolio refresh** — `do_refresh()` in `app.py` walks `holdings`, fetches each price from Alpha Vantage with a 13-second sleep between calls (free tier = 5 req/min, 25 req/day), upserts a daily `entries` row keyed by `(date, platform, stock)`, and sends an SMS via Resend's email-to-SMS gateway. Triggered by both the cron and `POST /refresh-prices`.
+1. **Portfolio refresh** — `do_refresh()` in `app.py` collects every distinct symbol from transactions + balances and fetches them in **one batched FMP `/quote` call** (`fetch_prices_batch`), then upserts a `prices` row keyed by `(symbol, date)` — the same daily row is overwritten on every intraday refresh. Cron runs **every minute Mon-Fri 9:30am-4:00pm ET**; SMS via Resend fires **only on the 16:00 ET close tick** (intraday + manual refreshes are silent). Also triggered by `POST /refresh-prices`.
 
 2. **Stock analysis** — `GET /analyze/<symbol>` returns a cached report from `analyses` if one is < 24 h old; otherwise runs `analyze_stock` (FMP fetch + scoring) → `synthesize_full_report` (Claude prose) and stores the combined result. Forces a refresh with `?refresh=true`.
 
@@ -48,7 +48,7 @@ python app.py                 # dev server on :5000
 gunicorn app:app --bind 0.0.0.0:$PORT   # what Railway runs
 ```
 
-Required env vars (see `.env.example`): `MONGO_URI`, `DB_NAME`, `APP_PASSWORD` (the server **refuses to start** if `APP_PASSWORD` is unset — there is no default). Optional but feature-gating: `ALPHA_VANTAGE_KEY` (price refresh), `FMP_API_KEY` (stock analyzer), `ANTHROPIC_API_KEY` (Claude synthesis), `RESEND_API_KEY` + `NOTIFY_VERIZON`/`NOTIFY_ATT` (SMS), `APP_URL` (link in SMS). `GET /health` reports which keys are configured.
+Required env vars (see `.env.example`): `MONGO_URI`, `DB_NAME`, `APP_PASSWORD` (the server **refuses to start** if `APP_PASSWORD` is unset — there is no default). Optional but feature-gating: `FMP_API_KEY` (price refresh + stock analyzer), `ANTHROPIC_API_KEY` (Claude synthesis), `RESEND_API_KEY` + `NOTIFY_VERIZON`/`NOTIFY_ATT` (SMS), `APP_URL` (link in SMS). `GET /health` reports which keys are configured.
 
 ### Auth model
 

@@ -20,7 +20,6 @@ CORS(app, expose_headers=["Authorization"])
 MONGO_URI        = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
 DB_NAME          = os.getenv("DB_NAME", "investment_tracker")
 APP_PASSWORD     = os.getenv("APP_PASSWORD")  # required, no default
-AV_KEY           = os.getenv("ALPHA_VANTAGE_KEY", "")
 RESEND_KEY       = os.getenv("RESEND_API_KEY", "")
 NOTIFY_VERIZON   = os.getenv("NOTIFY_VERIZON", "")
 NOTIFY_ATT       = os.getenv("NOTIFY_ATT", "")
@@ -32,7 +31,6 @@ if not APP_PASSWORD:
     raise RuntimeError("APP_PASSWORD env var must be set -- refusing to start with no password.")
 
 SESSION_TTL_DAYS = 30
-AV_DAILY_LIMIT   = 25  # Alpha Vantage free tier
 
 # -- Database ----------------------------------------------
 client   = MongoClient(MONGO_URI)
@@ -306,78 +304,69 @@ def require_auth(fn):
         return fn(*args, **kwargs)
     return wrapper
 
-def fetch_price(symbol):
-    """Fetch current price and previous close from Alpha Vantage.
-    Returns (price, prev_close, error)."""
-    if not AV_KEY:
-        return None, None, "ALPHA_VANTAGE_KEY not configured"
+def fetch_prices_batch(symbols):
+    """Fetch current prices for many symbols in one FMP call.
+    Returns (prices_by_symbol, error). prices_by_symbol maps SYM -> float price.
+    On total failure returns ({}, error_message)."""
+    if not FMP_KEY:
+        return {}, "FMP_API_KEY not configured"
+    if not symbols:
+        return {}, None
     try:
-        url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={AV_KEY}"
+        joined = ",".join(s.upper() for s in symbols)
+        url = f"https://financialmodelingprep.com/api/v3/quote/{joined}?apikey={FMP_KEY}"
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=15) as r:
+        with urllib.request.urlopen(req, timeout=20) as r:
             data = json.loads(r.read().decode())
-        q = data.get("Global Quote", {})
-        price = q.get("05. price")
-        prev  = q.get("08. previous close")
-        if price:
-            return float(price), float(prev) if prev else None, None
-        if "Note" in data or "Information" in data:
-            return None, None, "Rate limit reached"
-        return None, None, f"No data for {symbol}"
+        if not isinstance(data, list):
+            return {}, f"Unexpected FMP response: {str(data)[:200]}"
+        out = {}
+        for q in data:
+            sym = (q.get("symbol") or "").upper()
+            price = q.get("price")
+            if sym and price is not None:
+                out[sym] = float(price)
+        return out, None
     except Exception as e:
-        return None, None, str(e)
+        return {}, str(e)
 
-def do_refresh():
-    """Fetch today's close for every distinct symbol we track and upsert
+def do_refresh(notify=False):
+    """Fetch latest price for every distinct symbol we track and upsert
     into `prices`. Source of "what to fetch" is transactions + balances
-    (i.e. anything we currently hold). One AV call per distinct ticker."""
+    (i.e. anything we currently hold). One batched FMP call for all tickers.
+    SMS is sent only if `notify=True` (reserved for the 16:00 ET close tick)."""
     today   = datetime.utcnow().strftime("%Y-%m-%d")
     results = []
     errors  = []
 
-    # Symbols we currently care about: every distinct stock from transactions
-    # and balances. Prioritize by current portfolio value so the AV daily cap
-    # cuts the lowest-impact tickers first.
-    positions    = derive_all_positions()
-    value_by_sym = {}
-    for p in positions:
-        sym = p["stock"].upper()
-        value_by_sym[sym] = value_by_sym.get(sym, 0) + (p.get("value") or 0)
-    if not value_by_sym:
+    positions = derive_all_positions()
+    symbols   = sorted({p["stock"].upper() for p in positions})
+    if not symbols:
         return {"refreshed": 0, "errors": [], "date": today}
 
-    sorted_symbols = sorted(value_by_sym.keys(), key=lambda s: value_by_sym[s], reverse=True)
+    prices_by_sym, batch_err = fetch_prices_batch(symbols)
+    if batch_err:
+        print(f"[Refresh] Batch fetch failed: {batch_err}")
+        return {"refreshed": 0, "errors": [{"stock": "*", "error": batch_err}], "date": today}
 
-    if len(sorted_symbols) > AV_DAILY_LIMIT:
-        for sym in sorted_symbols[AV_DAILY_LIMIT:]:
-            errors.append({"stock": sym,
-                           "error": f"Skipped: exceeds Alpha Vantage daily limit ({AV_DAILY_LIMIT} tickers)"})
-        sorted_symbols = sorted_symbols[:AV_DAILY_LIMIT]
-
-    for i, symbol in enumerate(sorted_symbols):
-        if i > 0:
-            time.sleep(13)  # 13s gap = ~4.6 req/min, safely under AV's 5/min limit
-
-        price, _prev_close_unused, error = fetch_price(symbol)
-        print(f"[Refresh] {symbol}: price={price}, err={error}")
-
+    fetched_at = datetime.utcnow().isoformat()
+    for symbol in symbols:
+        price = prices_by_sym.get(symbol)
         if price is None:
-            errors.append({"stock": symbol, "error": error})
+            errors.append({"stock": symbol, "error": "No price returned by FMP"})
             continue
-
         prices.update_one(
             {"symbol": symbol, "date": today},
             {"$set": {
                 "symbol": symbol, "date": today,
                 "close": float(price),
-                "source": "alpha_vantage",
-                "fetched_at": datetime.utcnow().isoformat(),
+                "source": "fmp",
+                "fetched_at": fetched_at,
             }},
             upsert=True,
         )
         results.append({"stock": symbol, "close": price})
 
-    # Store refresh metadata
     now_utc = datetime.utcnow()
     meta.update_one(
         {"key": "last_refresh"},
@@ -385,13 +374,12 @@ def do_refresh():
         upsert=True
     )
 
-    # Send SMS if any succeeded
-    if results:
+    if notify and results:
         et_tz   = pytz.timezone("America/New_York")
         et_time = pytz.utc.localize(now_utc).astimezone(et_tz)
         send_sms(et_time.strftime("%I:%M %p").lstrip("0"))
 
-    print(f"[Refresh] Done: {len(results)} refreshed, {len(errors)} errors")
+    print(f"[Refresh] Done: {len(results)} refreshed, {len(errors)} errors, notify={notify}")
     return {"refreshed": len(results), "results": results, "errors": errors, "date": today}
 
 def send_sms(time_str):
@@ -435,16 +423,32 @@ def _scheduled_refresh():
             "pid": os.getpid(),
         })
     except DuplicateKeyError:
-        print(f"[Scheduler] Tick {tick_id} already claimed by another worker; skipping")
         return
-    print(f"[Scheduler] Worker pid={os.getpid()} won tick {tick_id}, running refresh")
-    _run_refresh_async()
+    # SMS only on the 16:00 ET close tick. Intraday minute ticks are silent.
+    is_close = (et_now.hour == 16 and et_now.minute == 0)
+    print(f"[Scheduler] Worker pid={os.getpid()} won tick {tick_id}, running refresh (notify={is_close})")
+    _run_refresh_async(notify=is_close)
 
 scheduler = BackgroundScheduler()
+# Per-minute refresh during US equities regular session: Mon-Fri 9:30am-4:00pm ET.
+# Cron 'minute=*' runs every minute of the included hours; we restrict hour 9 to
+# minutes 30-59 and hour 16 to minute 0 (the close itself) so we stay inside the
+# 9:30-16:00 window.
+ET_TZ = pytz.timezone("America/New_York")
 scheduler.add_job(
     _scheduled_refresh,
-    CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone=pytz.timezone("America/New_York")),
-    coalesce=True, max_instances=1,
+    CronTrigger(day_of_week="mon-fri", hour="10-15", minute="*", timezone=ET_TZ),
+    coalesce=True, max_instances=1, id="refresh_intraday",
+)
+scheduler.add_job(
+    _scheduled_refresh,
+    CronTrigger(day_of_week="mon-fri", hour=9, minute="30-59", timezone=ET_TZ),
+    coalesce=True, max_instances=1, id="refresh_open",
+)
+scheduler.add_job(
+    _scheduled_refresh,
+    CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone=ET_TZ),
+    coalesce=True, max_instances=1, id="refresh_close",
 )
 scheduler.start()
 
@@ -1297,13 +1301,13 @@ def get_stocks():
 # -- Refresh -----------------------------------------------
 _refresh_lock = threading.Lock()  # in-process guard against double-clicks
 
-def _run_refresh_async():
+def _run_refresh_async(notify=False):
     """Wrap do_refresh in the in-process lock so one worker can't run it twice."""
     if not _refresh_lock.acquire(blocking=False):
         print("[Refresh] Already running, skipping")
         return
     try:
-        do_refresh()
+        do_refresh(notify=notify)
     except Exception as e:
         print(f"[Refresh] Failed: {e}")
     finally:
@@ -1314,7 +1318,8 @@ def _run_refresh_async():
 def refresh_prices():
     if _refresh_lock.locked():
         return jsonify({"started": False, "error": "Refresh already in progress"}), 409
-    threading.Thread(target=_run_refresh_async, daemon=True).start()
+    # Manual refresh is silent — user is already in the app.
+    threading.Thread(target=_run_refresh_async, kwargs={"notify": False}, daemon=True).start()
     return jsonify({"started": True}), 202
 
 @app.route("/refresh-status", methods=["GET"])
@@ -1462,7 +1467,6 @@ def health():
     return jsonify({
         "status":        "ok",
         "db":            DB_NAME,
-        "alpha_vantage": "configured" if AV_KEY else "missing",
         "fmp":           "configured" if FMP_KEY else "missing -- add FMP_API_KEY",
         "claude":        "configured" if CLAUDE_KEY else "missing -- add ANTHROPIC_API_KEY",
         "scheduler":     "running"
