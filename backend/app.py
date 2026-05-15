@@ -361,7 +361,12 @@ def do_refresh(notify=False):
     errors  = []
 
     positions = derive_all_positions()
-    symbols   = sorted({p["stock"].upper() for p in positions})
+    # Skip value-only balance entries (e.g. 401k aggregate rows where stock=="TOTAL"
+    # or any balance with no shares). They have no real ticker to fetch.
+    symbols   = sorted({
+        p["stock"].upper() for p in positions
+        if p.get("shares") is not None and p["stock"].upper() != "TOTAL"
+    })
     if not symbols:
         meta.update_one(
             {"key": "last_refresh"},
