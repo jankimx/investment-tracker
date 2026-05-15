@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g
 from flask_cors import CORS
 from pymongo import MongoClient, DESCENDING, ASCENDING
 from pymongo.errors import DuplicateKeyError
@@ -490,50 +490,91 @@ def shares_as_of(platform, stock, date):
 
 
 def derive_all_positions():
-    """Return a list of dicts describing every currently-held position,
-    pulled from transactions OR balances depending on which source the
-    (platform, stock) is tracked under.
+    """Return a list of dicts describing every currently-held position.
+    Optimized for one page-load: 3 bulk Mongo queries total (all transactions,
+    all balances, latest 2 prices per symbol) instead of N-per-position
+    round-trips. Memoized for the duration of a single Flask request."""
+    cached = getattr(g, "_positions_cache", None)
+    if cached is not None:
+        return cached
 
-    Schema returned per position:
-      platform, stock, shares, cost_basis,
-      source ("transactions" | "balance"),
-      price (current close),
-      value (shares * price),
-      invested (shares * cost_basis),
-      daily_gain, daily_gain_pct,
-      prev_close,
-    """
-    positions = []
-    txn_keys  = set()
-
-    # Transaction-tracked positions
-    for r in txns.aggregate([
-        {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
-    ]):
-        platform = r["_id"]["platform"]
-        stock    = r["_id"]["stock"]
-        shares, cb = compute_position_from_transactions(platform, stock)
-        if shares <= 0:
+    # 1) Load every transaction in one shot, group in Python.
+    txn_by_key = {}  # (platform, stock) -> list of txn dicts (date-ordered)
+    for t in txns.find(
+        {},
+        {"_id": 0, "platform": 1, "stock": 1, "shares": 1,
+         "price_per_share": 1, "date": 1, "action": 1},
+    ).sort("date", ASCENDING):
+        key = (t.get("platform"), (t.get("stock") or "").upper())
+        if not key[0] or not key[1]:
             continue
-        txn_keys.add((platform, stock))
-        positions.append({
-            "platform": platform, "stock": stock,
-            "shares": round(shares, 6), "cost_basis": round(cb, 4),
-            "source": "transactions",
-        })
+        txn_by_key.setdefault(key, []).append(t)
 
-    # Balance-tracked positions (latest balance per (platform, stock))
+    # 2) Load latest balance per (platform, stock) in one aggregation.
+    latest_balance = {}
     for r in balances.aggregate([
         {"$sort":  {"date": DESCENDING}},
         {"$group": {"_id": {"platform": "$platform", "stock": "$stock"},
                     "latest": {"$first": "$$ROOT"}}},
     ]):
         b = r["latest"]
-        platform = b["platform"]
-        stock    = b["stock"]
-        if (platform, stock) in txn_keys:
-            # A position has transactions -- those win, ignore the balance row.
+        key = (b.get("platform"), (b.get("stock") or "").upper())
+        if key[0] and key[1]:
+            latest_balance[key] = b
+
+    # 3) For each distinct symbol, load the two most recent prices (today's
+    #    close + prev close) in one bulk aggregation.
+    all_symbols = {key[1] for key in txn_by_key.keys()} | {key[1] for key in latest_balance.keys()}
+    price_pairs = {}  # symbol -> (latest_close, prev_close)
+    if all_symbols:
+        for r in prices.aggregate([
+            {"$match": {"symbol": {"$in": list(all_symbols)}}},
+            {"$sort":  {"symbol": 1, "date": DESCENDING}},
+            {"$group": {"_id": "$symbol",
+                        "closes": {"$push": "$close"}}},
+        ]):
+            closes = r.get("closes") or []
+            price_pairs[r["_id"]] = (
+                float(closes[0]) if len(closes) >= 1 and closes[0] is not None else None,
+                float(closes[1]) if len(closes) >= 2 and closes[1] is not None else None,
+            )
+
+    # Walk transactions in-memory to compute (shares, cost_basis) per position
+    def walk(history):
+        shares = 0.0
+        cb     = 0.0
+        for t in history:
+            s = float(t.get("shares", 0))
+            p = float(t.get("price_per_share", 0))
+            # Legacy compat: action=sell + positive shares -> negative shares.
+            if t.get("action") == "sell" and s > 0:
+                s = -s
+            if s > 0:
+                ns = shares + s
+                cb = ((shares * cb) + (s * p)) / ns if ns > 0 else p
+                shares = ns
+            elif s < 0:
+                shares = max(0.0, shares + s)
+        return shares, cb
+
+    positions = []
+    txn_keys  = set()
+    for key, history in txn_by_key.items():
+        platform, stock = key
+        shares, cb = walk(history)
+        if shares <= 0:
             continue
+        txn_keys.add(key)
+        positions.append({
+            "platform": platform, "stock": stock,
+            "shares": round(shares, 6), "cost_basis": round(cb, 4),
+            "source": "transactions",
+        })
+
+    for key, b in latest_balance.items():
+        if key in txn_keys:
+            continue
+        platform, stock = key
         shares = float(b.get("shares", 0))
         if shares <= 0:
             continue
@@ -545,36 +586,33 @@ def derive_all_positions():
             "user_reported_value": b.get("value"),
         })
 
-    # Enrich with current price + value + daily gain
-    today = datetime.utcnow().strftime("%Y-%m-%d")
+    # Enrich with price + value + daily gain (no Mongo calls -- in-memory lookup)
     for pos in positions:
         sym = pos["stock"].upper()
-        price = get_latest_price(sym)
-        prev, prev_date = get_prev_price(sym, ref_date=today)
+        price, prev = price_pairs.get(sym, (None, None))
         shares = pos["shares"]
         cb     = pos["cost_basis"]
 
         if price is not None:
             pos["price"]    = round(price, 4)
             pos["value"]    = round(price * shares, 2)
-            pos["invested"] = round(cb * shares, 2)
         else:
-            # No price -- fall back to user-reported value for balance positions
-            pos["price"]    = None
-            pos["value"]    = (round(float(pos.get("user_reported_value") or 0), 2)
-                               if pos.get("source") == "balance" else None)
-            pos["invested"] = round(cb * shares, 2)
+            pos["price"] = None
+            pos["value"] = (round(float(pos.get("user_reported_value") or 0), 2)
+                            if pos.get("source") == "balance" else None)
+        pos["invested"] = round(cb * shares, 2)
 
-        if price is not None and prev is not None:
+        if price is not None and prev is not None and prev > 0:
             pos["prev_close"]     = round(prev, 4)
             pos["daily_gain"]     = round((price - prev) * shares, 2)
-            pos["daily_gain_pct"] = round((price - prev) / prev * 100, 2) if prev > 0 else None
+            pos["daily_gain_pct"] = round((price - prev) / prev * 100, 2)
         else:
             pos["prev_close"]     = None
             pos["daily_gain"]     = None
             pos["daily_gain_pct"] = None
         pos.pop("user_reported_value", None)
 
+    g._positions_cache = positions
     return positions
 
 
@@ -636,61 +674,147 @@ def ensure_price_history_covers(symbol, since_date):
 
 
 def derive_chart_series(since_date, platform_filter=None):
-    """Return slim {date, platform, stock, value} rows over a date window,
-    suitable for the dashboard chart. Reconstructs historical position values
-    from transactions (current shares as of each date) × prices (close on that
-    date) plus balances (most recent snapshot ≤ each date)."""
+    """Return slim {date, platform, stock, value} rows over a date window.
 
-    # Collect every (platform, stock) we've ever transacted in, plus every
-    # balance-tracked position.
-    keys = set()
-    for r in txns.aggregate([
-        {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
-    ]):
-        keys.add((r["_id"]["platform"], r["_id"]["stock"]))
-    for r in balances.aggregate([
-        {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
-    ]):
-        keys.add((r["_id"]["platform"], r["_id"]["stock"]))
+    Optimized for one page-load: 3 bulk Mongo queries instead of
+    O(positions × dates) round-trips. Strategy:
+      1. Load every transaction (any date) and every balance into memory.
+      2. Load every price >= since_date into a {symbol: [(date, close), ...]} map.
+      3. Walk each (platform, stock) position once: maintain a running share
+         count, step through trading dates, multiply by that day's close.
+    """
+    # 1) Load all transactions in one query, group by (platform, stock).
+    txn_by_key = {}
+    for t in txns.find(
+        {},
+        {"_id": 0, "platform": 1, "stock": 1, "shares": 1, "action": 1, "date": 1},
+    ).sort("date", ASCENDING):
+        key = (t.get("platform"), (t.get("stock") or "").upper())
+        if not key[0] or not key[1]:
+            continue
+        if platform_filter and key[0] != platform_filter:
+            continue
+        txn_by_key.setdefault(key, []).append(t)
 
+    # 2) Load all balances in one query, sorted ascending; keep them for "what
+    #    were the shares as of date X" lookups.
+    bal_by_key = {}
+    for b in balances.find(
+        {},
+        {"_id": 0, "platform": 1, "stock": 1, "shares": 1, "date": 1},
+    ).sort("date", ASCENDING):
+        key = (b.get("platform"), (b.get("stock") or "").upper())
+        if not key[0] or not key[1]:
+            continue
+        if platform_filter and key[0] != platform_filter:
+            continue
+        bal_by_key.setdefault(key, []).append(b)
+
+    keys = set(txn_by_key.keys()) | set(bal_by_key.keys())
     if not keys:
         return []
 
-    # Build dates: every distinct prices date >= since_date. (Skips weekends
-    # and holidays naturally because we only have rows for trading days.)
-    distinct_dates = sorted(prices.distinct("date", {"date": {"$gte": since_date}}))
+    symbols = {k[1] for k in keys}
+
+    # 3) Load every price in the window, plus the most recent price BEFORE the
+    #    window per symbol (so day 1 of the chart can be valued even if its
+    #    bar landed before since_date).
+    prices_by_sym = {s: [] for s in symbols}
+    for p in prices.find(
+        {"symbol": {"$in": list(symbols)}, "date": {"$gte": since_date}},
+        {"_id": 0, "symbol": 1, "date": 1, "close": 1},
+    ).sort("date", ASCENDING):
+        prices_by_sym.setdefault(p["symbol"], []).append((p["date"], float(p["close"])))
+
+    # Pre-window seed for forward-fill: most recent close strictly before
+    # since_date, per symbol.
+    seed_close = {}
+    for r in prices.aggregate([
+        {"$match": {"symbol": {"$in": list(symbols)}, "date": {"$lt": since_date}}},
+        {"$sort":  {"date": DESCENDING}},
+        {"$group": {"_id": "$symbol", "close": {"$first": "$close"},
+                    "date": {"$first": "$date"}}},
+    ]):
+        seed_close[r["_id"]] = float(r["close"])
+
+    # Set of every date that appears in prices for any tracked symbol within
+    # the window. (Skips weekends/holidays naturally.)
+    distinct_dates = sorted({d for series in prices_by_sym.values() for (d, _) in series})
     if not distinct_dates:
         return []
 
     out = []
-    txn_keys = {(p, s) for (p, s) in keys}
-    for platform, stock in sorted(keys):
-        if platform_filter and platform != platform_filter:
-            continue
-        sym = stock.upper()
-        is_balance = txns.count_documents({"platform": platform, "stock": stock}, limit=1) == 0
+    for (platform, stock) in sorted(keys):
+        sym = stock
+        history = txn_by_key.get((platform, stock), [])
+        bal_hist = bal_by_key.get((platform, stock), [])
+        is_balance_only = not history and bool(bal_hist)
+
+        # Walk dates with a running share count.
+        running_shares = 0.0
+        txn_idx = 0
+        bal_idx = 0
+
+        # Forward-fill price tracker: current_price holds the most recent
+        # close <= the current date.
+        sym_prices = prices_by_sym.get(sym, [])
+        price_idx  = 0
+        current_price = seed_close.get(sym)
+
+        # For transaction-tracked: any txns BEFORE since_date should be folded
+        # into the starting share count.
+        if not is_balance_only:
+            for t in history:
+                if t.get("date", "") >= since_date:
+                    break
+                s = float(t.get("shares", 0))
+                if t.get("action") == "sell" and s > 0:
+                    s = -s
+                running_shares += s
+                txn_idx += 1
+            running_shares = max(0.0, running_shares)
+
+        # For balance-tracked: seed running_shares from the latest balance
+        # before since_date.
+        if is_balance_only:
+            for b in bal_hist:
+                if b.get("date", "") < since_date:
+                    running_shares = float(b.get("shares", 0))
+                    bal_idx += 1
+                else:
+                    break
+
         for d in distinct_dates:
-            if is_balance:
-                b = balances.find_one(
-                    {"platform": platform, "stock": stock, "date": {"$lte": d}},
-                    sort=[("date", DESCENDING)],
-                )
-                if not b:
-                    continue
-                shares = float(b.get("shares", 0))
-            else:
-                shares = shares_as_of(platform, stock, d)
-            if shares <= 0:
-                continue
-            price = get_price_on(sym, d)
-            if price is None:
+            # Advance through txns dated <= d
+            if not is_balance_only:
+                while txn_idx < len(history) and history[txn_idx].get("date", "") <= d:
+                    s = float(history[txn_idx].get("shares", 0))
+                    if history[txn_idx].get("action") == "sell" and s > 0:
+                        s = -s
+                    running_shares += s
+                    txn_idx += 1
+                running_shares = max(0.0, running_shares)
+
+            # Advance through balance snapshots dated <= d
+            if is_balance_only:
+                while bal_idx < len(bal_hist) and bal_hist[bal_idx].get("date", "") <= d:
+                    running_shares = float(bal_hist[bal_idx].get("shares", 0))
+                    bal_idx += 1
+
+            # Advance price cursor to the latest known close on or before d
+            while price_idx < len(sym_prices) and sym_prices[price_idx][0] <= d:
+                current_price = sym_prices[price_idx][1]
+                price_idx += 1
+
+            if running_shares <= 0 or current_price is None:
                 continue
             out.append({
                 "date":     d,
                 "platform": platform,
                 "stock":    stock,
-                "value":    round(price * shares, 2),
+                "value":    round(current_price * running_shares, 2),
             })
+
     return out
 
 

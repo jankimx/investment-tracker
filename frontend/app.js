@@ -157,34 +157,62 @@ function showApp() {
 }
 
 // -- Load --------------------------------------------------
+//
+// Only fetch what the Dashboard needs on first paint. Other tabs lazy-load
+// their data when first opened (and re-fetch after mutations via
+// invalidate*() helpers).
+//
+// state.loaded.* tracks which secondary fetches have completed so we don't
+// re-hit the API on every tab click.
+state.loaded = { entries: false, stocks: false, transactions: false, balances: false };
+
 async function loadAll() {
+  // Mutations call loadAll(); when they do, any cached secondary data is now
+  // stale and should re-fetch on its next tab open.
+  invalidateAll();
   try {
-    const [entries, positions, chartData, platforms, stocks, summary, holdings, refreshStatus] = await Promise.all([
-      api('/entries?limit=200'),
+    const [positions, chartData, platforms, summary, holdings, refreshStatus] = await Promise.all([
       api('/positions'),
       api('/chart-data?days=90'),
       api('/platforms'),
-      api('/stocks'),
       api('/summary'),
       api('/holdings'),
       api('/refresh-status').catch(() => null),
     ]);
-    state.entries   = entries;
     state.positions = positions;
     state.chartRows = (chartData && chartData.rows) || [];
     state.platforms = platforms;
-    state.stocks    = stocks;
     state.summary   = summary;
     state.holdings  = holdings;
     updateDataLists();
     renderDashboard();
-    renderHoldings();
     applyRefreshStatus(refreshStatus);
     updateRefreshInfo();
   } catch (e) {
     console.error('loadAll failed:', e);
     showToast('Failed to load data', 4000);
   }
+}
+
+// On-demand fetchers for secondary data. Each is idempotent: it caches in
+// state.* and only re-fetches if forced.
+async function ensureEntries(force = false) {
+  if (state.loaded.entries && !force) return state.entries;
+  state.entries = await api('/entries?limit=200');
+  state.loaded.entries = true;
+  return state.entries;
+}
+async function ensureStocks(force = false) {
+  if (state.loaded.stocks && !force) return state.stocks;
+  state.stocks = await api('/stocks');
+  state.loaded.stocks = true;
+  updateDataLists();
+  return state.stocks;
+}
+function invalidateAll() {
+  // Called after mutations: clear secondary caches so the next tab open
+  // sees fresh data. Dashboard data is refetched via loadAll() directly.
+  state.loaded = { entries: false, stocks: false, transactions: false, balances: false };
 }
 
 function fillDatalist(id, values) {
@@ -204,16 +232,27 @@ function updateDataLists() {
 }
 
 // -- Tabs --------------------------------------------------
-function switchTab(tab) {
+async function switchTab(tab) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
   document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
   document.getElementById(`tab-${tab}`).classList.add('active');
-  if (tab === 'history')     renderHistory();
-  if (tab === 'projections') renderProjections();
-  if (tab === 'holdings')    { renderHoldings(); renderTransactions(); }
-  if (tab === 'balances')    renderBalances();
-  if (tab === 'analyze')     initAnalyzeTab();
+
+  if (tab === 'history') {
+    await Promise.all([ensureEntries(), ensureStocks()]);
+    renderHistory();
+  } else if (tab === 'projections') {
+    renderProjections();
+  } else if (tab === 'holdings') {
+    await ensureStocks();
+    renderHoldings();
+    renderTransactions();
+  } else if (tab === 'balances') {
+    await ensureStocks();
+    renderBalances();
+  } else if (tab === 'analyze') {
+    initAnalyzeTab();
+  }
 }
 
 // -- Refresh status ----------------------------------------
