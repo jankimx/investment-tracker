@@ -363,6 +363,15 @@ def do_refresh(notify=False):
     positions = derive_all_positions()
     symbols   = sorted({p["stock"].upper() for p in positions})
     if not symbols:
+        meta.update_one(
+            {"key": "last_refresh"},
+            {"$set": {
+                "key": "last_refresh", "timestamp": datetime.utcnow().isoformat(),
+                "date": today, "count": 0,
+                "errors": [{"stock": "*", "error": "No tracked symbols (transactions/balances empty)"}],
+            }},
+            upsert=True,
+        )
         return {"refreshed": 0, "errors": [], "date": today}
 
     prices_by_sym, errors_by_sym, batch_err = fetch_prices_batch(symbols)
@@ -1330,14 +1339,32 @@ def get_stocks():
 _refresh_lock = threading.Lock()  # in-process guard against double-clicks
 
 def _run_refresh_async(notify=False):
-    """Wrap do_refresh in the in-process lock so one worker can't run it twice."""
+    """Wrap do_refresh in the in-process lock so one worker can't run it twice.
+    On exception, persist the failure to meta.last_refresh so /refresh-status
+    can surface it — otherwise the error is only visible in server logs."""
     if not _refresh_lock.acquire(blocking=False):
         print("[Refresh] Already running, skipping")
         return
     try:
         do_refresh(notify=notify)
     except Exception as e:
-        print(f"[Refresh] Failed: {e}")
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[Refresh] Failed: {e}\n{tb}")
+        try:
+            meta.update_one(
+                {"key": "last_refresh"},
+                {"$set": {
+                    "key": "last_refresh",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "date": datetime.utcnow().strftime("%Y-%m-%d"),
+                    "count": 0,
+                    "errors": [{"stock": "*", "error": f"do_refresh exception: {type(e).__name__}: {e}"}],
+                }},
+                upsert=True,
+            )
+        except Exception as inner:
+            print(f"[Refresh] Could not record failure to meta: {inner}")
     finally:
         _refresh_lock.release()
 
