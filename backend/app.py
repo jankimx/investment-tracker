@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, g
+from flask import Flask, request, jsonify, g, has_request_context
 from flask_cors import CORS
 from pymongo import MongoClient, DESCENDING, ASCENDING
 from pymongo.errors import DuplicateKeyError
@@ -595,10 +595,14 @@ def derive_all_positions():
     """Return a list of dicts describing every currently-held position.
     Optimized for one page-load: 3 bulk Mongo queries total (all transactions,
     all balances, latest 2 prices per symbol) instead of N-per-position
-    round-trips. Memoized for the duration of a single Flask request."""
-    cached = getattr(g, "_positions_cache", None)
-    if cached is not None:
-        return cached
+    round-trips. Memoized for the duration of a single Flask request -- but
+    safe to call from background threads (the cache is skipped if there is
+    no active request context)."""
+    in_request = has_request_context()
+    if in_request:
+        cached = getattr(g, "_positions_cache", None)
+        if cached is not None:
+            return cached
 
     # 1) Load every transaction in one shot, group in Python.
     txn_by_key = {}  # (platform, stock) -> list of txn dicts (date-ordered)
@@ -736,7 +740,8 @@ def derive_all_positions():
         pos.pop("user_reported_value", None)
         pos.pop("user_reported_invested", None)
 
-    g._positions_cache = positions
+    if in_request:
+        g._positions_cache = positions
     return positions
 
 
