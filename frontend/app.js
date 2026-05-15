@@ -145,6 +145,7 @@ document.getElementById('login-pw').addEventListener('keydown', e => {
 });
 
 async function logout() {
+  stopAutoPoll();
   try { await api('/auth/logout', { method: 'POST' }); } catch { /* best effort */ }
   sessionStorage.removeItem('token');
   location.reload();
@@ -154,6 +155,35 @@ function showApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('main-app').style.display     = 'block';
   loadAll();
+  startAutoPoll();
+}
+
+// -- Auto-poll ---------------------------------------------
+// Polls /summary + co. every AUTO_POLL_MS while the tab is visible. Pauses
+// when the tab is hidden (Page Visibility API) and does an immediate refresh
+// on return. Backend cron also pushes new prices every minute, so 60s here
+// keeps the UI within ~60s of the latest FMP fetch.
+const AUTO_POLL_MS = 60_000;
+let _autoPollInterval = null;
+
+function startAutoPoll() {
+  stopAutoPoll();
+  _autoPollInterval = setInterval(() => {
+    if (document.hidden) return;
+    loadAll();
+  }, AUTO_POLL_MS);
+  document.addEventListener('visibilitychange', _onVisibility);
+}
+
+function stopAutoPoll() {
+  if (_autoPollInterval) { clearInterval(_autoPollInterval); _autoPollInterval = null; }
+  document.removeEventListener('visibilitychange', _onVisibility);
+}
+
+function _onVisibility() {
+  // When the user comes back to the tab, immediately refresh so they don't
+  // see stale numbers while waiting for the next interval tick.
+  if (!document.hidden) loadAll();
 }
 
 // -- Load --------------------------------------------------
