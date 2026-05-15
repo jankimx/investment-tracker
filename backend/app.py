@@ -198,7 +198,43 @@ def cleanup_superseded_balances():
         print(f"[Cleanup] Deleted {deleted} balance rows superseded by transactions")
     return deleted
 
+
+def migrate_share_balances_to_transactions():
+    """Convert legacy share-tracked balance rows into synthetic 'buy'
+    transactions and remove the balance row. Idempotent: a balance row that
+    has shares > 0 AND a real ticker (stock != 'TOTAL') is migrated; one
+    with shares=null/0 or stock='TOTAL' is left alone (those are value-only
+    snapshots and belong in `balances`)."""
+    converted = 0
+    for b in list(balances.find({"shares": {"$gt": 0}})):
+        platform = b.get("platform")
+        stock    = (b.get("stock") or "").upper()
+        if not platform or not stock or stock == "TOTAL":
+            continue
+        # If a transaction already exists for this position, the balance row
+        # is just dead duplicate -- drop it.
+        if txns.count_documents({"platform": platform, "stock": stock}, limit=1) > 0:
+            balances.delete_one({"_id": b["_id"]})
+            continue
+        shares     = float(b.get("shares", 0))
+        cost_basis = float(b.get("cost_basis") or 0)
+        txns.insert_one({
+            "platform": platform, "stock": stock,
+            "shares": shares,
+            "price_per_share": cost_basis,
+            "date": b.get("date") or datetime.utcnow().strftime("%Y-%m-%d"),
+            "created_at": datetime.utcnow().isoformat(),
+            "synthetic": True,
+            "note": "Migrated from legacy share-tracked balance row",
+        })
+        balances.delete_one({"_id": b["_id"]})
+        converted += 1
+    if converted:
+        print(f"[Migration] Converted {converted} share-tracked balances to transactions")
+    return converted
+
 try:
+    migrate_share_balances_to_transactions()
     cleanup_superseded_balances()
 except Exception as e:
     print(f"[Cleanup] Failed (non-fatal): {e}")

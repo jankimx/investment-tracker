@@ -665,7 +665,13 @@ function renderHoldings() {
   const el = document.getElementById('holdings-list');
   if (!el) return;
   el.replaceChildren();
-  if (!state.holdings.length) {
+
+  // Holdings tab is for transaction-tracked positions only. Value-only
+  // balances live on the Balances tab; they'd render meaninglessly here
+  // (no ticker, no shares).
+  const txnRows = (state.holdings || []).filter(h => h.source !== 'balance');
+
+  if (!txnRows.length) {
     const empty = document.createElement('div');
     empty.className = 'empty';
     empty.textContent = 'No holdings yet.';
@@ -686,7 +692,7 @@ function renderHoldings() {
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
-  state.holdings.forEach(h => {
+  txnRows.forEach(h => {
     const tr = document.createElement('tr');
     tr.appendChild(tdNode(badgeEl(h.platform)));
 
