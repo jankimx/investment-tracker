@@ -389,6 +389,8 @@ function renderDashboard() {
   if (s.daily_gain !== null && s.daily_gain !== undefined) {
     const dg = fmtGain(s.daily_gain, s.daily_gain_pct);
     setGain('m-daily', 'm-dailypct', dg);
+    applyTickFlash(document.getElementById('m-daily'),    'dashboard::today',     s.daily_gain);
+    applyTickFlash(document.getElementById('m-dailypct'), 'dashboard::today_pct', s.daily_gain);
   } else {
     setText('m-daily', '--');
     setText('m-dailypct', 'Not enough data');
@@ -649,6 +651,11 @@ function buildTr(r) {
 
   const [tdTG, tdTGP]  = makeGainTd(r.totalGain, r.totalGainPct);
   const [tdDG, tdDGP]  = makeGainTd(r.dailyGain, r.dailyGainPct);
+  if (r.dailyGain != null) {
+    const dailyKey = posRowKey(r.platform, r.stock) + '::daily';
+    applyTickFlash(tdDG,  dailyKey,          r.dailyGain);
+    applyTickFlash(tdDGP, dailyKey + '_pct', r.dailyGain);
+  }
 
   [tdBadge, tdStock, tdSpark, tdVal, tdInv, tdTG, tdTGP, tdDG, tdDGP, tdPct].forEach(td => tr.appendChild(td));
   return tr;
@@ -667,9 +674,9 @@ function applyTickFlash(cell, key, newValue) {
   _prevValues.set(key, newValue);
   if (prev == null || prev === newValue) return;
   cell.classList.add(newValue > prev ? 'flash-up' : 'flash-down');
-  // CSS keyframes drive the fade; clean the class up after the animation
-  // finishes so the next change re-triggers it.
-  setTimeout(() => cell.classList.remove('flash-up', 'flash-down'), 800);
+  // CSS keyframes drive the fade (500ms); clean the class up just after the
+  // animation finishes so the next change re-triggers it.
+  setTimeout(() => cell.classList.remove('flash-up', 'flash-down'), 550);
 }
 
 function buildAggregateTr(label, groupKey, grp, totalValue) {

@@ -167,11 +167,22 @@ body {
 .pos-table tr:last-child td { border-bottom: none; }
 .pos-table tr:hover td { background: var(--bg2); }
 
-/* Robinhood-style tick flash: brief green/red tint when a value changes. */
-@keyframes flash-up   { 0% { background-color: rgba(35,209,96,0.45); } 100% { background-color: transparent; } }
-@keyframes flash-down { 0% { background-color: rgba(235,77,75,0.45); } 100% { background-color: transparent; } }
-.flash-up   { animation: flash-up   700ms ease-out; }
-.flash-down { animation: flash-down 700ms ease-out; }
+/* Robinhood-mobile-style tick flash: a quick, light tint that fades smoothly.
+   Brand-matched colors (RH green #00C805, RH red #FF5000), low alpha so it
+   doesn't strobe with many positions, and ease-out so it feels like a soft
+   pulse rather than a sharp blink. */
+@keyframes flash-up   {
+  0%   { background-color: rgba(0,200,5,0.22); }
+  60%  { background-color: rgba(0,200,5,0.10); }
+  100% { background-color: transparent; }
+}
+@keyframes flash-down {
+  0%   { background-color: rgba(255,80,0,0.22); }
+  60%  { background-color: rgba(255,80,0,0.10); }
+  100% { background-color: transparent; }
+}
+.flash-up   { animation: flash-up   500ms ease-out; }
+.flash-down { animation: flash-down 500ms ease-out; }
 
 .badge {
   display: inline-block; padding: 2px 7px; border-radius: 4px;
