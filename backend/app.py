@@ -7,8 +7,9 @@ from bson.errors import InvalidId
 from dotenv import load_dotenv
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import wraps
-import os, json, time, base64, secrets, urllib.request, pytz, threading
+import os, json, time, base64, secrets, urllib.request, urllib.parse, pytz, threading
 from datetime import datetime, timedelta
 
 load_dotenv()
@@ -304,31 +305,48 @@ def require_auth(fn):
         return fn(*args, **kwargs)
     return wrapper
 
+def _fetch_one_price(symbol):
+    """Hit FMP's stable /quote endpoint for a single symbol.
+    Returns (symbol, price_or_None, error_or_None). Matches analyzer.py's
+    proven-working endpoint shape (same /stable base, same query-param style)."""
+    try:
+        url = "https://financialmodelingprep.com/stable/quote?" + urllib.parse.urlencode(
+            {"symbol": symbol, "apikey": FMP_KEY}
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode())
+        if isinstance(data, dict) and ("Error Message" in data or "error" in data):
+            return symbol, None, str(data.get("Error Message") or data.get("error"))
+        # /stable/quote returns a list with one entry per symbol.
+        if isinstance(data, list) and data:
+            price = data[0].get("price")
+            if price is not None:
+                return symbol, float(price), None
+            return symbol, None, "No 'price' field in FMP response"
+        return symbol, None, f"Unexpected FMP response: {str(data)[:160]}"
+    except Exception as e:
+        return symbol, None, str(e)
+
 def fetch_prices_batch(symbols):
-    """Fetch current prices for many symbols in one FMP call.
+    """Fetch current prices for many symbols in parallel.
     Returns (prices_by_symbol, error). prices_by_symbol maps SYM -> float price.
-    On total failure returns ({}, error_message)."""
+    On total config failure returns ({}, error_message); per-symbol failures
+    are not surfaced here (caller iterates over `symbols` to detect missing)."""
     if not FMP_KEY:
         return {}, "FMP_API_KEY not configured"
     if not symbols:
         return {}, None
-    try:
-        joined = ",".join(s.upper() for s in symbols)
-        url = f"https://financialmodelingprep.com/api/v3/quote/{joined}?apikey={FMP_KEY}"
-        req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=20) as r:
-            data = json.loads(r.read().decode())
-        if not isinstance(data, list):
-            return {}, f"Unexpected FMP response: {str(data)[:200]}"
-        out = {}
-        for q in data:
-            sym = (q.get("symbol") or "").upper()
-            price = q.get("price")
-            if sym and price is not None:
-                out[sym] = float(price)
-        return out, None
-    except Exception as e:
-        return {}, str(e)
+    out = {}
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = [executor.submit(_fetch_one_price, s) for s in symbols]
+        for fut in as_completed(futures):
+            sym, price, err = fut.result()
+            if price is not None:
+                out[sym] = price
+            elif err:
+                print(f"[Refresh] {sym} fetch error: {err}")
+    return out, None
 
 def do_refresh(notify=False):
     """Fetch latest price for every distinct symbol we track and upsert
