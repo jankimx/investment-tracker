@@ -273,13 +273,22 @@ async function manualRefresh() {
   try {
     await api('/refresh-prices', { method: 'POST' });
     // Poll briefly until the lock clears, then reload.
+    let lastStatus = null;
     for (let i = 0; i < 30; i++) {
       await new Promise(r => setTimeout(r, 1000));
       const s = await api('/refresh-status').catch(() => null);
+      if (s) lastStatus = s;
       if (s && !s.in_progress) break;
     }
     await loadAll();
-    showToast('Prices refreshed', 2500);
+    if (lastStatus && (lastStatus.errors || []).length > 0) {
+      const first = lastStatus.errors[0];
+      showToast(`Refresh error: ${first.error || JSON.stringify(first)}`, 8000);
+    } else if (lastStatus && lastStatus.count === 0) {
+      showToast('Refresh returned 0 prices', 6000);
+    } else {
+      showToast(`Refreshed ${lastStatus ? lastStatus.count : ''} prices`, 2500);
+    }
   } catch (e) {
     showToast(e.message || 'Refresh failed', 4000);
   } finally {

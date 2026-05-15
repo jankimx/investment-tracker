@@ -347,30 +347,37 @@ def do_refresh(notify=False):
     prices_by_sym, batch_err = fetch_prices_batch(symbols)
     if batch_err:
         print(f"[Refresh] Batch fetch failed: {batch_err}")
-        return {"refreshed": 0, "errors": [{"stock": "*", "error": batch_err}], "date": today}
-
-    fetched_at = datetime.utcnow().isoformat()
-    for symbol in symbols:
-        price = prices_by_sym.get(symbol)
-        if price is None:
-            errors.append({"stock": symbol, "error": "No price returned by FMP"})
-            continue
-        prices.update_one(
-            {"symbol": symbol, "date": today},
-            {"$set": {
-                "symbol": symbol, "date": today,
-                "close": float(price),
-                "source": "fmp",
-                "fetched_at": fetched_at,
-            }},
-            upsert=True,
-        )
-        results.append({"stock": symbol, "close": price})
+        errors.append({"stock": "*", "error": batch_err})
+    else:
+        fetched_at = datetime.utcnow().isoformat()
+        for symbol in symbols:
+            price = prices_by_sym.get(symbol)
+            if price is None:
+                errors.append({"stock": symbol, "error": "No price returned by FMP"})
+                continue
+            prices.update_one(
+                {"symbol": symbol, "date": today},
+                {"$set": {
+                    "symbol": symbol, "date": today,
+                    "close": float(price),
+                    "source": "fmp",
+                    "fetched_at": fetched_at,
+                }},
+                upsert=True,
+            )
+            results.append({"stock": symbol, "close": price})
 
     now_utc = datetime.utcnow()
+    # Always record the attempt so /refresh-status can surface failures.
     meta.update_one(
         {"key": "last_refresh"},
-        {"$set": {"key": "last_refresh", "timestamp": now_utc.isoformat(), "date": today, "count": len(results)}},
+        {"$set": {
+            "key": "last_refresh",
+            "timestamp": now_utc.isoformat(),
+            "date": today,
+            "count": len(results),
+            "errors": errors[:10],  # cap to avoid unbounded growth
+        }},
         upsert=True
     )
 
@@ -1331,10 +1338,11 @@ def refresh_status():
         return jsonify({"refreshed_today": False, "last_refresh": None, "in_progress": in_progress})
     today = datetime.utcnow().strftime("%Y-%m-%d")
     return jsonify({
-        "refreshed_today": m.get("date") == today,
+        "refreshed_today": m.get("date") == today and m.get("count", 0) > 0,
         "last_refresh":    m.get("timestamp"),
         "date":            m.get("date"),
         "count":           m.get("count", 0),
+        "errors":          m.get("errors", []),
         "in_progress":     in_progress,
     })
 
