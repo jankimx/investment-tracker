@@ -178,6 +178,31 @@ try:
 except Exception as e:
     print(f"[Migration] Failed (will retry next boot): {e}")
 
+
+def cleanup_superseded_balances():
+    """Delete balance rows whose (platform, stock) is now covered by a
+    transaction-tracked position. Cheap and idempotent -- safe to call on
+    every startup and after every new transaction."""
+    txn_keys = []
+    for r in txns.aggregate([
+        {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
+    ]):
+        txn_keys.append((r["_id"]["platform"], r["_id"]["stock"]))
+    if not txn_keys:
+        return 0
+    deleted = 0
+    for (platform, stock) in txn_keys:
+        result = balances.delete_many({"platform": platform, "stock": stock})
+        deleted += result.deleted_count
+    if deleted:
+        print(f"[Cleanup] Deleted {deleted} balance rows superseded by transactions")
+    return deleted
+
+try:
+    cleanup_superseded_balances()
+except Exception as e:
+    print(f"[Cleanup] Failed (non-fatal): {e}")
+
 # -- Helpers -----------------------------------------------
 def serialize(doc):
     doc["id"] = str(doc.pop("_id"))
@@ -986,6 +1011,9 @@ def add_transaction():
         "date": date,
         "created_at": datetime.utcnow().isoformat(),
     })
+
+    # Any pre-existing balance row for this same position is now superseded.
+    balances.delete_many({"platform": platform, "stock": stock})
 
     # If this transaction is dated before our earliest price for the symbol,
     # backfill historical bars from FMP so the chart can render from that date.
