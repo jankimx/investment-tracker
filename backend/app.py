@@ -575,42 +575,64 @@ def derive_all_positions():
         if key in txn_keys:
             continue
         platform, stock = key
-        shares = float(b.get("shares", 0))
-        if shares <= 0:
+        shares_raw = b.get("shares")
+        is_value_only = shares_raw is None or stock == "TOTAL"
+        shares = float(shares_raw) if shares_raw is not None else 0.0
+        # Skip positions where the user zeroed out share-tracked balances;
+        # but for value-only entries we only care about value > 0.
+        if not is_value_only and shares <= 0:
+            continue
+        if is_value_only and not (b.get("value") or 0):
             continue
         positions.append({
             "platform": platform, "stock": stock,
-            "shares": round(shares, 6),
-            "cost_basis": round(float(b.get("cost_basis", 0)), 4),
+            "shares": round(shares, 6) if not is_value_only else None,
+            "cost_basis": round(float(b.get("cost_basis") or 0), 4) if not is_value_only else None,
             "source": "balance",
+            "value_only": is_value_only,
             "user_reported_value": b.get("value"),
+            "user_reported_invested": b.get("invested"),
         })
 
     # Enrich with price + value + daily gain (no Mongo calls -- in-memory lookup)
     for pos in positions:
-        sym = pos["stock"].upper()
-        price, prev = price_pairs.get(sym, (None, None))
-        shares = pos["shares"]
-        cb     = pos["cost_basis"]
+        sym    = pos["stock"].upper()
+        shares = pos.get("shares") or 0.0
+        cb     = pos.get("cost_basis") or 0.0
+        is_value_only = pos.pop("value_only", False)
 
-        if price is not None:
-            pos["price"]    = round(price, 4)
-            pos["value"]    = round(price * shares, 2)
-        else:
-            pos["price"] = None
-            pos["value"] = (round(float(pos.get("user_reported_value") or 0), 2)
-                            if pos.get("source") == "balance" else None)
-        pos["invested"] = round(cb * shares, 2)
-
-        if price is not None and prev is not None and prev > 0:
-            pos["prev_close"]     = round(prev, 4)
-            pos["daily_gain"]     = round((price - prev) * shares, 2)
-            pos["daily_gain_pct"] = round((price - prev) / prev * 100, 2)
-        else:
+        if is_value_only:
+            # Value-only balance: trust the user-reported total directly,
+            # don't try price math.
+            pos["price"]      = None
+            pos["value"]      = round(float(pos.get("user_reported_value") or 0), 2)
+            pos["invested"]   = round(float(pos.get("user_reported_invested") or 0), 2)
+            pos["shares"]     = None
+            pos["cost_basis"] = None
             pos["prev_close"]     = None
             pos["daily_gain"]     = None
             pos["daily_gain_pct"] = None
+        else:
+            price, prev = price_pairs.get(sym, (None, None))
+            if price is not None:
+                pos["price"]    = round(price, 4)
+                pos["value"]    = round(price * shares, 2)
+            else:
+                pos["price"] = None
+                pos["value"] = (round(float(pos.get("user_reported_value") or 0), 2)
+                                if pos.get("source") == "balance" else None)
+            pos["invested"] = round(cb * shares, 2)
+
+            if price is not None and prev is not None and prev > 0:
+                pos["prev_close"]     = round(prev, 4)
+                pos["daily_gain"]     = round((price - prev) * shares, 2)
+                pos["daily_gain_pct"] = round((price - prev) / prev * 100, 2)
+            else:
+                pos["prev_close"]     = None
+                pos["daily_gain"]     = None
+                pos["daily_gain_pct"] = None
         pos.pop("user_reported_value", None)
+        pos.pop("user_reported_invested", None)
 
     g._positions_cache = positions
     return positions
@@ -696,12 +718,12 @@ def derive_chart_series(since_date, platform_filter=None):
             continue
         txn_by_key.setdefault(key, []).append(t)
 
-    # 2) Load all balances in one query, sorted ascending; keep them for "what
-    #    were the shares as of date X" lookups.
+    # 2) Load all balances in one query, sorted ascending. Keep both shares
+    #    (for share-tracked snapshots) and value (for value-only snapshots).
     bal_by_key = {}
     for b in balances.find(
         {},
-        {"_id": 0, "platform": 1, "stock": 1, "shares": 1, "date": 1},
+        {"_id": 0, "platform": 1, "stock": 1, "shares": 1, "value": 1, "date": 1},
     ).sort("date", ASCENDING):
         key = (b.get("platform"), (b.get("stock") or "").upper())
         if not key[0] or not key[1]:
@@ -737,9 +759,16 @@ def derive_chart_series(since_date, platform_filter=None):
     ]):
         seed_close[r["_id"]] = float(r["close"])
 
-    # Set of every date that appears in prices for any tracked symbol within
-    # the window. (Skips weekends/holidays naturally.)
-    distinct_dates = sorted({d for series in prices_by_sym.values() for (d, _) in series})
+    # Set of dates we'll plot: every distinct date in prices within the window,
+    # plus every balance snapshot date within the window (so value-only
+    # positions can render even with no price data).
+    date_set = {d for series in prices_by_sym.values() for (d, _) in series}
+    for bal_hist in bal_by_key.values():
+        for b in bal_hist:
+            d = b.get("date")
+            if d and d >= since_date:
+                date_set.add(d)
+    distinct_dates = sorted(date_set)
     if not distinct_dates:
         return []
 
@@ -750,19 +779,47 @@ def derive_chart_series(since_date, platform_filter=None):
         bal_hist = bal_by_key.get((platform, stock), [])
         is_balance_only = not history and bool(bal_hist)
 
-        # Walk dates with a running share count.
+        # Value-only balances are flagged by stock == "TOTAL" OR any balance
+        # entry that has value but no shares. Use the dollar value directly,
+        # skip all price math.
+        is_value_only = is_balance_only and any(
+            (b.get("shares") in (None, 0)) and (b.get("value") is not None)
+            for b in bal_hist
+        )
+
+        if is_value_only:
+            # Step through balance snapshots in chronological order; forward-
+            # fill the latest reported value across distinct_dates.
+            current_value = None
+            bal_idx = 0
+            # Seed from any snapshot before since_date
+            while bal_idx < len(bal_hist) and bal_hist[bal_idx].get("date", "") < since_date:
+                if bal_hist[bal_idx].get("value") is not None:
+                    current_value = float(bal_hist[bal_idx]["value"])
+                bal_idx += 1
+            for d in distinct_dates:
+                while bal_idx < len(bal_hist) and bal_hist[bal_idx].get("date", "") <= d:
+                    if bal_hist[bal_idx].get("value") is not None:
+                        current_value = float(bal_hist[bal_idx]["value"])
+                    bal_idx += 1
+                if current_value is None or current_value <= 0:
+                    continue
+                out.append({
+                    "date":     d,
+                    "platform": platform,
+                    "stock":    stock,
+                    "value":    round(current_value, 2),
+                })
+            continue
+
+        # Share-tracked path (transactions OR share-based balances)
         running_shares = 0.0
         txn_idx = 0
         bal_idx = 0
-
-        # Forward-fill price tracker: current_price holds the most recent
-        # close <= the current date.
         sym_prices = prices_by_sym.get(sym, [])
         price_idx  = 0
         current_price = seed_close.get(sym)
 
-        # For transaction-tracked: any txns BEFORE since_date should be folded
-        # into the starting share count.
         if not is_balance_only:
             for t in history:
                 if t.get("date", "") >= since_date:
@@ -774,18 +831,15 @@ def derive_chart_series(since_date, platform_filter=None):
                 txn_idx += 1
             running_shares = max(0.0, running_shares)
 
-        # For balance-tracked: seed running_shares from the latest balance
-        # before since_date.
         if is_balance_only:
             for b in bal_hist:
                 if b.get("date", "") < since_date:
-                    running_shares = float(b.get("shares", 0))
+                    running_shares = float(b.get("shares") or 0)
                     bal_idx += 1
                 else:
                     break
 
         for d in distinct_dates:
-            # Advance through txns dated <= d
             if not is_balance_only:
                 while txn_idx < len(history) and history[txn_idx].get("date", "") <= d:
                     s = float(history[txn_idx].get("shares", 0))
@@ -795,13 +849,11 @@ def derive_chart_series(since_date, platform_filter=None):
                     txn_idx += 1
                 running_shares = max(0.0, running_shares)
 
-            # Advance through balance snapshots dated <= d
             if is_balance_only:
                 while bal_idx < len(bal_hist) and bal_hist[bal_idx].get("date", "") <= d:
-                    running_shares = float(bal_hist[bal_idx].get("shares", 0))
+                    running_shares = float(bal_hist[bal_idx].get("shares") or 0)
                     bal_idx += 1
 
-            # Advance price cursor to the latest known close on or before d
             while price_idx < len(sym_prices) and sym_prices[price_idx][0] <= d:
                 current_price = sym_prices[price_idx][1]
                 price_idx += 1
@@ -962,45 +1014,69 @@ def get_balances():
     q = {}
     if request.args.get("platform"): q["platform"] = request.args["platform"]
     if request.args.get("stock"):    q["stock"]    = request.args["stock"].upper()
-    return jsonify([serialize(b) for b in balances.find(q).sort("date", DESCENDING)])
+    rows = [serialize(b) for b in balances.find(q).sort("date", DESCENDING)]
+    # Hide balance rows that conflict with a transaction-tracked position for
+    # the same (platform, stock). The dashboard already ignores them; surface
+    # the same filtering here so the Balances tab only shows active records.
+    txn_keys = set()
+    for r in txns.aggregate([
+        {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
+    ]):
+        txn_keys.add((r["_id"]["platform"], r["_id"]["stock"]))
+    rows = [b for b in rows if (b.get("platform"), b.get("stock")) not in txn_keys]
+    return jsonify(rows)
 
 @app.route("/balances", methods=["POST"])
 @require_auth
 def add_balance():
+    """Two supported shapes:
+
+    Value-only (the common 401k case -- you just have a dollar amount):
+        { platform: "<name>", date, value, invested? }
+        Internally stored with stock="TOTAL", shares=null.
+
+    Share-tracked (you know the exact ticker + share count):
+        { platform, stock, date, shares, cost_basis?, value? }
+    """
     d = request.get_json() or {}
-    for f in ["platform", "stock", "date", "shares"]:
+    for f in ["platform", "date"]:
         if f not in d:
             return jsonify({"error": f"Missing: {f}"}), 400
-    platform   = d["platform"]
-    stock      = d["stock"].upper()
-    date       = d["date"]
-    shares     = float(d["shares"])
-    cost_basis = float(d.get("cost_basis", 0))
-    value      = float(d["value"]) if d.get("value") not in (None, "") else None
-    note       = d.get("note", "")
+    if "value" not in d and "shares" not in d:
+        return jsonify({"error": "Provide at least one of: value, shares"}), 400
 
-    # If this position has any transaction history, it's a buy/sell-tracked
-    # position; balances would conflict. Block the write rather than silently
-    # ignore it on read.
-    if txns.count_documents({"platform": platform, "stock": stock}, limit=1) > 0:
+    platform = d["platform"]
+    date     = d["date"]
+    stock    = (d.get("stock") or "TOTAL").upper()
+    shares   = float(d["shares"]) if d.get("shares") not in (None, "") else None
+    cb       = float(d.get("cost_basis")) if d.get("cost_basis") not in (None, "") else None
+    value    = float(d["value"]) if d.get("value") not in (None, "") else None
+    invested = float(d.get("invested")) if d.get("invested") not in (None, "") else None
+    note     = d.get("note", "")
+
+    # Block conflict with transaction-tracked positions on the SAME key.
+    if stock != "TOTAL" and txns.count_documents(
+            {"platform": platform, "stock": stock}, limit=1) > 0:
         return jsonify({"error": "This position is transaction-tracked; use /transactions instead"}), 409
 
     balances.update_one(
         {"platform": platform, "stock": stock, "date": date},
         {"$set": {
             "platform": platform, "stock": stock, "date": date,
-            "shares": shares, "cost_basis": cost_basis,
-            "value": value, "note": note,
+            "shares": shares, "cost_basis": cb,
+            "value": value, "invested": invested,
+            "note": note,
             "created_at": datetime.utcnow().isoformat(),
         }},
         upsert=True,
     )
 
-    # Backfill historical prices if this snapshot is older than what we have.
-    try:
-        ensure_price_history_covers(stock, date)
-    except Exception as ex:
-        print(f"[Balances] backfill failed for {stock} since {date}: {ex}")
+    # Only meaningful to backfill prices for real tickers, not the "TOTAL" sentinel
+    if stock and stock != "TOTAL":
+        try:
+            ensure_price_history_covers(stock, date)
+        except Exception as ex:
+            print(f"[Balances] backfill failed for {stock} since {date}: {ex}")
 
     return jsonify({"ok": True}), 201
 

@@ -44,7 +44,6 @@
       <button class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</button>
       <button class="tab" data-tab="holdings" onclick="switchTab('holdings')">Holdings</button>
       <button class="tab" data-tab="balances" onclick="switchTab('balances')">Balances</button>
-      <button class="tab" data-tab="history" onclick="switchTab('history')">History</button>
       <button class="tab" data-tab="projections" onclick="switchTab('projections')">Projections</button>
       <button class="tab" data-tab="analyze" onclick="switchTab('analyze')">Analyze</button>
     </div>
@@ -167,71 +166,34 @@
         <p style="font-size:12px;color:var(--text2);margin-bottom:16px">For accounts where you only have periodic statements -- 401k, HSA, target-date funds. Enter the snapshot from a statement.</p>
         <div class="form-grid">
           <div class="form-group">
-            <label>Date</label>
-            <input type="date" id="bal-date" />
-          </div>
-          <div class="form-group">
-            <label>Platform</label>
-            <input type="text" id="bal-platform" placeholder="Jon - Fidelity 401k" list="dl-platform" autocomplete="off" />
+            <label>Name</label>
+            <input type="text" id="bal-name" placeholder="Jon's Fidelity 401k" list="dl-platform" autocomplete="off" />
             <datalist id="dl-platform"></datalist>
           </div>
           <div class="form-group">
-            <label>Ticker</label>
-            <input type="text" id="bal-stock" placeholder="FSELX" list="dl-stock" autocomplete="off" />
-            <datalist id="dl-stock"></datalist>
+            <label>Value ($)</label>
+            <input type="number" id="bal-value" placeholder="50000.00" min="0" step="0.01" />
+          </div>
+          <div class="form-group">
+            <label>Date</label>
+            <input type="date" id="bal-date" />
           </div>
         </div>
-        <div class="form-grid">
+        <div class="form-grid-2">
           <div class="form-group">
-            <label>Shares</label>
-            <input type="number" id="bal-shares" placeholder="382.549" min="0" step="0.0001" />
+            <label>Amount invested ($) <span style="color:var(--text3)">optional</span></label>
+            <input type="number" id="bal-invested" placeholder="0.00" min="0" step="0.01" />
           </div>
           <div class="form-group">
-            <label>Avg cost / share ($)</label>
-            <input type="number" id="bal-cost" placeholder="46.85" min="0" step="0.01" />
+            <label>Note <span style="color:var(--text3)">optional</span></label>
+            <input type="text" id="bal-note" placeholder="e.g. Q2 2026 statement" />
           </div>
-          <div class="form-group">
-            <label>Reported value ($) <span style="color:var(--text3)">optional</span></label>
-            <input type="number" id="bal-value" placeholder="leave blank to derive" min="0" step="0.01" />
-          </div>
-        </div>
-        <div class="form-group" style="margin-bottom:16px">
-          <label>Note <span style="color:var(--text3)">optional</span></label>
-          <input type="text" id="bal-note" placeholder="e.g. Q2 2026 statement" />
         </div>
         <button class="btn btn-primary" id="bal-btn" onclick="submitBalance()">Save balance</button>
       </div>
       <div class="card">
         <div class="card-title">Recent balances</div>
         <div id="balances-list"><div class="empty">No balances yet.</div></div>
-      </div>
-    </div>
-
-    <!-- History -->
-    <div id="tab-history" class="section">
-      <div class="filter-row">
-        <label>Platform</label>
-        <div class="select-wrap">
-          <select id="hist-platform" onchange="renderHistory()"><option value="all">All</option></select>
-        </div>
-        <label>Stock</label>
-        <div class="select-wrap">
-          <select id="hist-stock" onchange="renderHistory()"><option value="all">All</option></select>
-        </div>
-        <button class="btn btn-sm" onclick="exportCSV()" style="margin-left:auto">Export CSV</button>
-      </div>
-      <div style="overflow-x:auto">
-        <table>
-          <thead>
-            <tr>
-              <th>Date</th><th>Platform</th><th>Stock</th>
-              <th class="td-r">Shares</th><th class="td-r">Price</th>
-              <th class="td-r">Value</th><th class="td-r">Invested</th>
-              <th class="td-r">Gain/Loss</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="hist-body"><tr><td colspan="9" class="empty">Loading...</td></tr></tbody>
-        </table>
       </div>
     </div>
 

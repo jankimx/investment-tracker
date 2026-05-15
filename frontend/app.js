@@ -196,12 +196,6 @@ async function loadAll() {
 
 // On-demand fetchers for secondary data. Each is idempotent: it caches in
 // state.* and only re-fetches if forced.
-async function ensureEntries(force = false) {
-  if (state.loaded.entries && !force) return state.entries;
-  state.entries = await api('/entries?limit=200');
-  state.loaded.entries = true;
-  return state.entries;
-}
 async function ensureStocks(force = false) {
   if (state.loaded.stocks && !force) return state.stocks;
   state.stocks = await api('/stocks');
@@ -238,10 +232,7 @@ async function switchTab(tab) {
   document.querySelector(`[data-tab="${tab}"]`).classList.add('active');
   document.getElementById(`tab-${tab}`).classList.add('active');
 
-  if (tab === 'history') {
-    await Promise.all([ensureEntries(), ensureStocks()]);
-    renderHistory();
-  } else if (tab === 'projections') {
+  if (tab === 'projections') {
     renderProjections();
   } else if (tab === 'holdings') {
     await ensureStocks();
@@ -837,15 +828,13 @@ async function deleteTransaction(id) {
 
 
 async function submitBalance() {
-  const date     = document.getElementById('bal-date').value;
-  const platform = document.getElementById('bal-platform').value.trim();
-  const stock    = document.getElementById('bal-stock').value.trim().toUpperCase();
-  const shares   = document.getElementById('bal-shares').value;
-  const cost     = document.getElementById('bal-cost').value;
+  const name     = document.getElementById('bal-name').value.trim();
   const value    = document.getElementById('bal-value').value;
+  const date     = document.getElementById('bal-date').value;
+  const invested = document.getElementById('bal-invested').value;
   const note     = document.getElementById('bal-note').value.trim();
-  if (!date || !platform || !stock || !shares) {
-    showToast('Fill in date, platform, ticker, shares');
+  if (!name || !value || !date) {
+    showToast('Fill in name, value, and date');
     return;
   }
 
@@ -855,17 +844,16 @@ async function submitBalance() {
     await api('/balances', {
       method: 'POST',
       body: JSON.stringify({
-        date, platform, stock,
-        shares:     Number(shares),
-        cost_basis: cost  ? Number(cost)  : 0,
-        value:      value ? Number(value) : null,
+        platform: name,
+        date,
+        value:    Number(value),
+        invested: invested ? Number(invested) : null,
         note,
       }),
     });
-    document.getElementById('bal-shares').value = '';
-    document.getElementById('bal-cost').value   = '';
-    document.getElementById('bal-value').value  = '';
-    document.getElementById('bal-note').value   = '';
+    document.getElementById('bal-value').value    = '';
+    document.getElementById('bal-invested').value = '';
+    document.getElementById('bal-note').value     = '';
     showToast('Balance saved');
     await loadAll();
     renderBalances();
@@ -891,10 +879,10 @@ async function renderBalances() {
     const table = document.createElement('table');
     const thead = document.createElement('thead');
     const htr   = document.createElement('tr');
-    ['Date','Platform','Ticker','Shares','Cost/share','Value',''].forEach((label, i) => {
+    ['Date','Name','Value','Invested','Note',''].forEach((label, i) => {
       const th = document.createElement('th');
       th.textContent = label;
-      if (i >= 3 && i <= 5) th.className = 'td-r';
+      if (i === 2 || i === 3) th.className = 'td-r';
       htr.appendChild(th);
     });
     thead.appendChild(htr);
@@ -904,10 +892,12 @@ async function renderBalances() {
       const tr = document.createElement('tr');
       tr.appendChild(tdText(b.date));
       tr.appendChild(tdNode(badgeEl(b.platform)));
-      tr.appendChild(tdText(b.stock));
-      tr.appendChild(tdText(Number(b.shares).toLocaleString('en-US', { maximumFractionDigits: 4 }), 'td-r'));
-      tr.appendChild(tdText(b.cost_basis ? fmtDec(b.cost_basis) : '--', 'td-r'));
       tr.appendChild(tdText(b.value ? fmtDec(b.value) : '--', 'td-r'));
+      tr.appendChild(tdText(b.invested ? fmtDec(b.invested) : '--', 'td-r'));
+      const noteTd = tdText(b.note || '');
+      noteTd.style.fontSize = '11px';
+      noteTd.style.color = 'var(--text3)';
+      tr.appendChild(noteTd);
       const btn = document.createElement('button');
       btn.className = 'btn btn-sm btn-danger';
       btn.textContent = 'Del';
@@ -935,76 +925,6 @@ async function deleteEntry(id) {
   if (!confirm('Delete this entry?')) return;
   try { await api('/entries/' + id, { method: 'DELETE' }); showToast('Deleted'); await loadAll(); }
   catch (e) { showToast('Failed', 3000); }
-}
-
-// -- History -----------------------------------------------
-function fillFilterSelect(sel, values, current) {
-  sel.replaceChildren();
-  const all = document.createElement('option');
-  all.value = 'all';
-  all.textContent = 'All';
-  sel.appendChild(all);
-  values.forEach(v => {
-    const o = document.createElement('option');
-    o.value = v;
-    o.textContent = v;
-    if (v === current) o.selected = true;
-    sel.appendChild(o);
-  });
-}
-
-function renderHistory() {
-  const hpf  = document.getElementById('hist-platform');
-  const hst  = document.getElementById('hist-stock');
-  fillFilterSelect(hpf, state.platforms, hpf.value);
-  fillFilterSelect(hst, state.stocks, hst.value);
-
-  let filtered = [...state.entries].sort((a, b) => a.date < b.date ? 1 : -1);
-  if (hpf.value !== 'all') filtered = filtered.filter(e => e.platform === hpf.value);
-  if (hst.value !== 'all') filtered = filtered.filter(e => e.stock    === hst.value);
-
-  const tbody = document.getElementById('hist-body');
-  tbody.replaceChildren();
-  if (!filtered.length) {
-    const tr = document.createElement('tr');
-    const td = tdText('No entries match.', 'empty');
-    td.colSpan = 8;
-    tr.appendChild(td);
-    tbody.appendChild(tr);
-    return;
-  }
-
-  filtered.forEach(e => {
-    const tr = document.createElement('tr');
-    tr.appendChild(tdText(e.date));
-    tr.appendChild(tdNode(badgeEl(e.platform)));
-    tr.appendChild(tdText(e.stock));
-    tr.appendChild(tdText(e.shares ? Number(e.shares).toFixed(4) : '--', 'td-r'));
-    tr.appendChild(tdText(e.price ? fmtDec(e.price) : '--', 'td-r'));
-    tr.appendChild(tdText(fmtDec(e.value), 'td-r'));
-    tr.appendChild(tdText(e.invested ? fmtDec(e.invested) : '--', 'td-r'));
-
-    const gainTd = document.createElement('td');
-    gainTd.className = 'td-r';
-    if (e.invested) {
-      const g = fmtGain(e.value - e.invested, null);
-      const span = document.createElement('span');
-      span.className = g.cls;
-      span.textContent = g.dollar;
-      gainTd.appendChild(span);
-    } else {
-      gainTd.textContent = '--';
-    }
-    tr.appendChild(gainTd);
-
-    const btn = document.createElement('button');
-    btn.className = 'btn btn-sm btn-danger';
-    btn.textContent = 'Del';
-    btn.addEventListener('click', () => { deleteEntry(e.id); setTimeout(renderHistory, 400); });
-    tr.appendChild(tdNode(btn));
-
-    tbody.appendChild(tr);
-  });
 }
 
 async function exportCSV() {
