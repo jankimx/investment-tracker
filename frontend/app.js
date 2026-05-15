@@ -256,12 +256,23 @@ function applyRefreshStatus(s) {
     const dt   = new Date(s.last_refresh + 'Z');
     const time = dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
     span.className   = 'refresh-status-ok';
-    span.textContent = `Refreshed today at ${time}`;
+    span.textContent = `Refreshed today at ${time} (${s.count} prices)`;
   } else {
     span.className   = 'refresh-status-pending';
     span.textContent = 'Not yet refreshed today';
   }
   el.appendChild(span);
+
+  // Persist any errors from the last attempt right under the status, so we
+  // don't lose them when the toast disappears.
+  const errs = s.errors || [];
+  if (errs.length) {
+    const errBox = document.createElement('div');
+    errBox.style.cssText = 'flex-basis:100%;font-size:11px;color:#ff6b6b;margin-top:4px;';
+    const summary = `Last refresh errors (${errs.length}): `;
+    errBox.textContent = summary + errs.slice(0, 3).map(e => `${e.stock}: ${e.error}`).join(' | ');
+    el.appendChild(errBox);
+  }
 }
 
 async function manualRefresh() {
