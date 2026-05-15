@@ -60,6 +60,10 @@ body {
   background: rgba(35,209,96,0.12); color: var(--green);
   border-radius: 4px; border: 1px solid rgba(35,209,96,0.2);
 }
+.scheduled-badge.closed {
+  background: rgba(160,160,160,0.10); color: var(--text3);
+  border-color: rgba(160,160,160,0.18);
+}
 .btn-logout {
   font-size: 12px; color: var(--text3); background: none;
   border: none; cursor: pointer; padding: 4px;

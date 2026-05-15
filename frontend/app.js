@@ -159,31 +159,67 @@ function showApp() {
 }
 
 // -- Auto-poll ---------------------------------------------
-// Polls /summary + co. every AUTO_POLL_MS while the tab is visible. Pauses
-// when the tab is hidden (Page Visibility API) and does an immediate refresh
-// on return. Backend cron also pushes new prices every minute, so 60s here
-// keeps the UI within ~60s of the latest FMP fetch.
+// Polls /summary + co. every AUTO_POLL_MS while the tab is visible and the
+// US equities regular session is open (Mon-Fri 9:30am-4pm ET). Outside
+// market hours nothing changes server-side -- the backend cron is off too
+// -- so polling buys nothing. Manual refresh button remains active 24/7.
 const AUTO_POLL_MS = 60_000;
 let _autoPollInterval = null;
+let _badgeInterval    = null;
+
+function isMarketHours() {
+  // Use America/New_York consistently so the user's local TZ doesn't matter.
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(new Date());
+  const get = type => parts.find(p => p.type === type)?.value;
+  const wd  = get('weekday'); // "Mon" .. "Sun"
+  const hh  = parseInt(get('hour'), 10);
+  const mm  = parseInt(get('minute'), 10);
+  if (wd === 'Sat' || wd === 'Sun') return false;
+  const minutes = hh * 60 + mm;
+  return minutes >= 9 * 60 + 30 && minutes <= 16 * 60; // 09:30 -- 16:00 ET inclusive
+}
+
+function updateMarketBadge() {
+  const el = document.getElementById('market-badge');
+  if (!el) return;
+  if (isMarketHours()) {
+    el.textContent = 'Auto-refresh on';
+    el.classList.remove('closed');
+  } else {
+    el.textContent = 'Market closed';
+    el.classList.add('closed');
+  }
+}
 
 function startAutoPoll() {
   stopAutoPoll();
+  updateMarketBadge();
   _autoPollInterval = setInterval(() => {
     if (document.hidden) return;
+    if (!isMarketHours()) { updateMarketBadge(); return; }
     loadAll();
   }, AUTO_POLL_MS);
+  // Cheap separate ticker so the badge flips at 9:30/16:00 boundaries even
+  // when no poll is happening.
+  _badgeInterval = setInterval(updateMarketBadge, 30_000);
   document.addEventListener('visibilitychange', _onVisibility);
 }
 
 function stopAutoPoll() {
   if (_autoPollInterval) { clearInterval(_autoPollInterval); _autoPollInterval = null; }
+  if (_badgeInterval)    { clearInterval(_badgeInterval);    _badgeInterval    = null; }
   document.removeEventListener('visibilitychange', _onVisibility);
 }
 
 function _onVisibility() {
   // When the user comes back to the tab, immediately refresh so they don't
-  // see stale numbers while waiting for the next interval tick.
-  if (!document.hidden) loadAll();
+  // see stale numbers while waiting for the next interval tick -- but only
+  // during market hours; outside, nothing's changed on the server.
+  if (!document.hidden && isMarketHours()) loadAll();
+  updateMarketBadge();
 }
 
 // -- Load --------------------------------------------------
