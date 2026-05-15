@@ -75,6 +75,13 @@ body {
 .refresh-bar strong { color: var(--text); font-weight: 500; font-size: 13px; }
 .refresh-status-ok  { color: var(--green); }
 .refresh-status-pending { color: var(--text3); }
+.btn-refresh {
+  margin-left: auto; font-size: 12px; padding: 5px 12px;
+  background: var(--bg2, #1a1a1a); color: var(--text2); border: 1px solid var(--border);
+  border-radius: 4px; cursor: pointer;
+}
+.btn-refresh:hover:not(:disabled) { color: var(--text); border-color: var(--text3); }
+.btn-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* -- Metrics -------------------------------------------- */
 .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; margin-bottom: 32px; }

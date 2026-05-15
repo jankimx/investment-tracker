@@ -187,7 +187,6 @@ async function loadAll() {
     updateDataLists();
     renderDashboard();
     applyRefreshStatus(refreshStatus);
-    updateRefreshInfo();
   } catch (e) {
     console.error('loadAll failed:', e);
     showToast('Failed to load data', 4000);
@@ -265,23 +264,28 @@ function applyRefreshStatus(s) {
   el.appendChild(span);
 }
 
-function updateRefreshInfo() {
-  const el = document.getElementById('refresh-info');
-  if (!el) return;
-  // One API call per DISTINCT ticker, not per holdings row -- the same stock
-  // on multiple platforms only costs one call.
-  const tickers = new Set(state.holdings.map(h => (h.stock || '').toUpperCase()));
-  const count = tickers.size;
-  if (!count) { el.textContent = ''; return; }
-  const times = Math.floor(25 / count);
-
-  el.replaceChildren();
-  el.appendChild(document.createTextNode('Each refresh uses '));
-  const num = document.createElement('strong');
-  num.style.color = 'var(--text)';
-  num.textContent = String(count);
-  el.appendChild(num);
-  el.appendChild(document.createTextNode(` of 25 daily API calls — ~${times}x per day`));
+async function manualRefresh() {
+  const btn = document.getElementById('btn-refresh-now');
+  if (!btn || btn.disabled) return;
+  btn.disabled = true;
+  const originalText = btn.textContent;
+  btn.textContent = 'Refreshing…';
+  try {
+    await api('/refresh-prices', { method: 'POST' });
+    // Poll briefly until the lock clears, then reload.
+    for (let i = 0; i < 30; i++) {
+      await new Promise(r => setTimeout(r, 1000));
+      const s = await api('/refresh-status').catch(() => null);
+      if (s && !s.in_progress) break;
+    }
+    await loadAll();
+    showToast('Prices refreshed', 2500);
+  } catch (e) {
+    showToast(e.message || 'Refresh failed', 4000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
 }
 
 // -- Dashboard ---------------------------------------------
