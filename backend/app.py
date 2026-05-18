@@ -1788,6 +1788,55 @@ def insights_dashboard():
     })
 
 
+@app.route("/insights/debug/news/<symbol>", methods=["GET"])
+@require_auth
+def insights_debug_news(symbol):
+    """Direct probe of FMP /stock_news, bypassing the news cache. Returns the
+    URL called (key masked), HTTP status, and raw response so we can see why
+    the risk card sees zero items. Diagnostic-only; safe to leave in place."""
+    symbol = symbol.upper().strip()
+    if not FMP_KEY:
+        return jsonify({"error": "FMP_API_KEY not configured"}), 503
+
+    since = (datetime.utcnow() - timedelta(days=NEWS_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    url   = ("https://financialmodelingprep.com/api/v3/stock_news"
+             f"?tickers={symbol}&from={since}&limit=10&apikey={FMP_KEY}")
+    url_masked = url.replace(FMP_KEY, "***")
+    out = {"url": url_masked}
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            out["status"]    = r.status
+            out["raw_body"]  = r.read(8000).decode(errors="replace")
+        # Try to parse so the response shape is visible
+        try:
+            parsed = json.loads(out["raw_body"])
+            out["parsed_type"] = type(parsed).__name__
+            if isinstance(parsed, list):
+                out["item_count"] = len(parsed)
+                if parsed:
+                    out["first_item_keys"] = list(parsed[0].keys()) if isinstance(parsed[0], dict) else None
+            elif isinstance(parsed, dict):
+                out["dict_keys"] = list(parsed.keys())
+        except Exception as pe:
+            out["parse_error"] = str(pe)
+    except urllib.error.HTTPError as e:
+        out["status"]   = e.code
+        out["error"]    = "HTTPError"
+        out["raw_body"] = e.read(4000).decode(errors="replace")
+    except Exception as e:
+        out["error"] = f"{type(e).__name__}: {e}"
+
+    # Also surface what's in the news cache for this symbol today
+    cached = news.find_one({"symbol": symbol, "date": datetime.utcnow().strftime("%Y-%m-%d")})
+    out["cache"] = {
+        "exists":     bool(cached),
+        "fetched_at": cached.get("fetched_at") if cached else None,
+        "item_count": len(cached.get("items", [])) if cached else 0,
+    }
+    return jsonify(out)
+
+
 @app.route("/insights/risk-news/<symbol>", methods=["GET"])
 @require_auth
 def insights_risk_news(symbol):
