@@ -10,7 +10,8 @@ let state = {
   platforms: [], stocks: [],
   summary: null, holdings: [], transactions: [],
   posGrouping: 'none', posSortCol: 'value', posSortDir: 1,
-  benchmarkOverlay: { symbol: null, series: null }  // chart overlay state
+  benchmarkOverlay: { symbol: null, series: null },  // chart overlay state
+  chartDays: 90                                       // matches dash-period default
 };
 
 let growthChart = null;
@@ -242,7 +243,7 @@ async function loadAll() {
   try {
     const [positions, chartData, platforms, summary, holdings, refreshStatus] = await Promise.all([
       api('/positions'),
-      api('/chart-data?days=90'),
+      api('/chart-data?days=' + (state.chartDays || 90)),
       api('/platforms'),
       api('/summary'),
       api('/holdings'),
@@ -426,6 +427,33 @@ function renderDashboard() {
 function setText(id, val) {
   const el = document.getElementById(id);
   if (el) el.textContent = val;
+}
+
+async function onChartPeriodChange() {
+  const sel = document.getElementById('dash-period');
+  if (!sel) return;
+  const val = sel.value;
+  let days;
+  if (val === 'ytd') {
+    const now = new Date();
+    const jan1 = new Date(now.getFullYear(), 0, 1);
+    days = Math.max(1, Math.ceil((now - jan1) / 86400000));
+  } else if (val === 'all') {
+    days = 730;  // backend's CHART_MAX_DAYS cap
+  } else {
+    days = parseInt(val, 10) || 90;
+  }
+  state.chartDays = days;
+  try {
+    const data = await api('/chart-data?days=' + days);
+    state.chartRows = (data && data.rows) || [];
+    // Drop any stale benchmark overlay — its dates won't match the new window
+    state.benchmarkOverlay = { symbol: null, series: null };
+    renderDashboard();
+  } catch (e) {
+    console.error('Failed to load chart period', e);
+    showToast('Could not change period', 3000);
+  }
 }
 
 function setGain(valId, pctId, g) {
@@ -1912,10 +1940,17 @@ function buildEmptyStateCard(card) {
 }
 
 function buildBenchmarkCard(card) {
-  const detail   = card.detail || {};
-  const choices  = detail.available_benchmarks || ['SPY', 'QQQ', 'VTI'];
-  const def      = detail.default_benchmark || choices[0];
-  const cmpFor   = sym => (detail.comparisons || []).find(c => c.benchmark === sym);
+  const detail        = card.detail || {};
+  const benchChoices  = detail.available_benchmarks || ['SPY', 'QQQ', 'VTI'];
+  const periodChoices = detail.available_periods    || ['1M', '3M', 'YTD'];
+  const defaultBench  = detail.default_benchmark    || benchChoices[0];
+  const defaultPeriod = detail.default_period       || 'YTD';
+
+  // comparisons is { [sym]: { [period]: stats } } in the v4 payload.
+  const cmpFor = (sym, period) => {
+    const symData = (detail.comparisons || {})[sym];
+    return symData ? symData[period] : null;
+  };
 
   const wrap = document.createElement('div');
   wrap.className = 'cta-card cta-' + (card.severity || 'info');
@@ -1932,14 +1967,16 @@ function buildBenchmarkCard(card) {
     wrap.appendChild(prose);
   }
 
-  // Per-benchmark mini-table so the dropdown change updates a visible number.
+  // Mini-table that re-renders when either selector changes.
   const cmpEl = document.createElement('div');
   cmpEl.className = 'benchmark-compare';
-  function refreshCompare(sym) {
-    const c = cmpFor(sym);
+  function refreshCompare() {
+    const sym    = benchSelect.value;
+    const period = periodSelect.value;
+    const c      = cmpFor(sym, period);
     cmpEl.replaceChildren();
     if (!c) {
-      cmpEl.textContent = 'No data for ' + sym;
+      cmpEl.textContent = `No ${period} data for ${sym}`;
       return;
     }
     const portfolioRow = document.createElement('div');
@@ -1951,58 +1988,68 @@ function buildBenchmarkCard(card) {
     const deltaRow = document.createElement('div');
     deltaRow.className = 'benchmark-row benchmark-delta';
     const deltaCls = c.delta_pp >= 0 ? 'positive' : 'negative';
-    deltaRow.appendChild(_kv('Delta', _signPct(c.delta_pp), deltaCls));
+    deltaRow.appendChild(_kv(`Delta (${period})`, _signPct(c.delta_pp), deltaCls));
     cmpEl.appendChild(portfolioRow);
     cmpEl.appendChild(benchRow);
     cmpEl.appendChild(deltaRow);
   }
 
-  // Controls: dropdown + toggle button.
+  // Controls row: benchmark dropdown + period dropdown + overlay toggle.
   const controls = document.createElement('div');
   controls.className = 'benchmark-controls';
 
-  const select = document.createElement('select');
-  select.className = 'benchmark-select';
-  choices.forEach(sym => {
+  const benchSelect = document.createElement('select');
+  benchSelect.className = 'benchmark-select';
+  benchChoices.forEach(sym => {
     const opt = document.createElement('option');
     opt.value = sym;
     opt.textContent = sym;
-    if (sym === (state.benchmarkOverlay?.symbol || def)) opt.selected = true;
-    select.appendChild(opt);
+    if (sym === (state.benchmarkOverlay?.symbol || defaultBench)) opt.selected = true;
+    benchSelect.appendChild(opt);
   });
-  select.addEventListener('change', () => {
-    refreshCompare(select.value);
-    // If overlay is currently active, swap to the new benchmark.
+  benchSelect.addEventListener('change', () => {
+    refreshCompare();
     if (state.benchmarkOverlay?.symbol) {
-      loadBenchmarkOverlay(select.value);
+      loadBenchmarkOverlay(benchSelect.value);
     }
   });
+
+  const periodSelect = document.createElement('select');
+  periodSelect.className = 'benchmark-select';
+  periodChoices.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p;
+    opt.textContent = p;
+    if (p === defaultPeriod) opt.selected = true;
+    periodSelect.appendChild(opt);
+  });
+  periodSelect.addEventListener('change', refreshCompare);
 
   const btn = document.createElement('button');
   btn.className = 'cta-card-btn';
   function refreshBtn() {
-    btn.textContent = state.benchmarkOverlay?.symbol === select.value
+    btn.textContent = state.benchmarkOverlay?.symbol === benchSelect.value
       ? 'Hide overlay'
       : (card.cta_label || 'Compare on chart');
   }
   refreshBtn();
   btn.addEventListener('click', async () => {
-    if (state.benchmarkOverlay?.symbol === select.value) {
+    if (state.benchmarkOverlay?.symbol === benchSelect.value) {
       clearBenchmarkOverlay();
     } else {
-      await loadBenchmarkOverlay(select.value);
+      await loadBenchmarkOverlay(benchSelect.value);
     }
     refreshBtn();
   });
 
-  controls.appendChild(select);
+  controls.appendChild(benchSelect);
+  controls.appendChild(periodSelect);
   controls.appendChild(btn);
 
-  refreshCompare(select.value);
+  refreshCompare();
   wrap.appendChild(cmpEl);
   wrap.appendChild(controls);
 
-  // Stash for renderChart to redraw the legend label correctly.
   wrap._refreshBtn = refreshBtn;
   return wrap;
 }

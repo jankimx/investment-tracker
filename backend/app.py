@@ -1574,21 +1574,24 @@ def _ytd_start_date():
 def _load_benchmark_data_for_insights():
     """Build the inputs that insights.compute_benchmark_comparison() expects.
 
+    Fetches a year of history so all benchmark periods (1M / 3M / YTD) have
+    coverage regardless of when in the calendar year we are.
+
     Returns (portfolio_totals_by_date, benchmark_closes_by_symbol). May raise
     on price-fetch failures -- caller (insights.generate_benchmark_card)
     catches and skips the benchmark card."""
-    ytd_start = _ytd_start_date()
+    earliest_start = (datetime.utcnow() - timedelta(days=400)).strftime("%Y-%m-%d")
 
-    # Make sure each benchmark has historical bars back to YTD. ensure_price_
-    # history_covers is idempotent and a no-op if we already have coverage.
+    # Make sure each benchmark has historical bars back to the earliest period.
+    # ensure_price_history_covers is idempotent — no-op once we have coverage.
     for sym in BENCHMARK_SYMBOLS:
         try:
-            ensure_price_history_covers(sym, ytd_start)
+            ensure_price_history_covers(sym, earliest_start)
         except Exception as ex:
             print(f"[Insights/benchmark] backfill failed for {sym}: {ex}")
 
-    # Portfolio total per date over the YTD window.
-    chart_rows = derive_chart_series(ytd_start)
+    # Portfolio total per date over the full window.
+    chart_rows = derive_chart_series(earliest_start)
     portfolio_totals = {}
     for r in chart_rows:
         d = r["date"]
@@ -1599,7 +1602,7 @@ def _load_benchmark_data_for_insights():
     for sym in BENCHMARK_SYMBOLS:
         closes = {}
         for p in prices.find(
-            {"symbol": sym, "date": {"$gte": ytd_start}},
+            {"symbol": sym, "date": {"$gte": earliest_start}},
             {"_id": 0, "date": 1, "close": 1},
         ):
             if p.get("close") is not None:

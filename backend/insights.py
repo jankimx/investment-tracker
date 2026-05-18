@@ -13,7 +13,7 @@ us bump a single card's version to force just that card to regenerate while
 leaving the others alone.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 
 # -- Card registry -------------------------------------------------
@@ -21,7 +21,7 @@ from datetime import datetime
 # Used by app.py to invalidate per-card caches.
 CARD_VERSIONS = {
     "concentration": 2,   # v2: empty-state card when below threshold (no more silent hide)
-    "benchmark":     3,   # v3: headline format "pp" -> "%" (user-friendly)
+    "benchmark":     4,   # v4: multi-period support (1M/3M/YTD); nested comparisons shape
     "risk_news":     3,   # v3: FMP news endpoint migrated v3/stock_news -> stable/news/stock
 }
 
@@ -86,6 +86,17 @@ BENCHMARK_DELTA_THRESHOLD_PP   = 2.0   # show the card when |portfolio - benchma
 BENCHMARK_CRITICAL_DELTA_PP    = 5.0   # critical severity at >= 5pp
 DEFAULT_BENCHMARK              = "SPY"
 AVAILABLE_BENCHMARKS           = ["SPY", "QQQ", "VTI"]
+BENCHMARK_PERIODS              = ["1M", "3M", "YTD"]
+DEFAULT_BENCHMARK_PERIOD       = "YTD"
+
+
+def _benchmark_period_start(label, today=None):
+    """Start date (YYYY-MM-DD) for a benchmark comparison period."""
+    today = today or datetime.utcnow().date()
+    if label == "1M":  return (today - timedelta(days=30)).isoformat()
+    if label == "3M":  return (today - timedelta(days=90)).isoformat()
+    if label == "YTD": return f"{today.year}-01-01"
+    return None
 
 RISK_VERIFY_MAX_ATTEMPTS       = 5
 RISK_MIN_ITEMS_FOR_CARD        = 1     # show card with even one notable item
@@ -223,94 +234,110 @@ def build_concentration_card(stats, prose=None):
 
 # -- Benchmark card -----------------------------------------------
 def compute_benchmark_comparison(portfolio_totals_by_date, benchmark_closes_by_symbol):
-    """Compute portfolio-vs-benchmark return over the longest window the
-    portfolio data supports.
+    """Compute portfolio-vs-benchmark return across multiple time windows
+    (1M / 3M / YTD) for every benchmark.
 
     Args:
         portfolio_totals_by_date: {YYYY-MM-DD: total_portfolio_value}.
                                   Caller produces this (e.g., from
-                                  derive_chart_series rolled up across positions).
+                                  derive_chart_series rolled up across positions)
+                                  with enough history to cover the longest
+                                  period (≥ 1 year recommended).
         benchmark_closes_by_symbol: {symbol: {YYYY-MM-DD: close_price}}.
-                                    Keys are benchmark tickers (SPY/QQQ/VTI).
 
-    Returns the comparison stats dict, or None if there isn't enough data
-    to compute even one benchmark.
+    Returns: {default_benchmark, available_benchmarks, default_period,
+              available_periods, comparisons: {symbol: {period: stats}}}
+    or None if there's not enough data to compute even one (symbol, period).
     """
-    dates = sorted(d for d, v in portfolio_totals_by_date.items() if v and v > 0)
-    if len(dates) < 2:
+    if not portfolio_totals_by_date:
         return None
+    today = datetime.utcnow().date()
 
-    actual_start = dates[0]
-    actual_end   = dates[-1]
-    p_start      = portfolio_totals_by_date[actual_start]
-    p_end        = portfolio_totals_by_date[actual_end]
-    if p_start <= 0:
-        return None
-    portfolio_pct = (p_end / p_start - 1) * 100
-
-    comparisons = []
+    out_comparisons = {}  # {symbol: {period: {portfolio_pct, benchmark_pct, delta_pp, from, to}}}
     for symbol in AVAILABLE_BENCHMARKS:
         closes = benchmark_closes_by_symbol.get(symbol, {})
         if not closes:
             continue
-        # For the start: take the earliest benchmark date >= portfolio's start
-        # (handles holidays/weekends and backfill gaps). For the end: take
-        # the latest benchmark date <= portfolio's end. Both must exist.
-        bench_dates = sorted(closes.keys())
-        starts = [d for d in bench_dates if d >= actual_start]
-        ends   = [d for d in bench_dates if d <= actual_end]
-        if not starts or not ends:
-            continue
-        bench_start = closes[starts[0]]
-        bench_end   = closes[ends[-1]]
-        if bench_start <= 0:
-            continue
-        benchmark_pct = (bench_end / bench_start - 1) * 100
-        comparisons.append({
-            "benchmark":      symbol,
-            "portfolio_pct":  round(portfolio_pct, 2),
-            "benchmark_pct":  round(benchmark_pct, 2),
-            "delta_pp":       round(portfolio_pct - benchmark_pct, 2),
-        })
+        sym_periods = {}
+        for period in BENCHMARK_PERIODS:
+            period_start = _benchmark_period_start(period, today)
+            # Take portfolio dates within this period, with positive value.
+            dates_in = sorted(
+                d for d, v in portfolio_totals_by_date.items()
+                if d >= period_start and v and v > 0
+            )
+            if len(dates_in) < 2:
+                continue
+            actual_start = dates_in[0]
+            actual_end   = dates_in[-1]
+            p_start      = portfolio_totals_by_date[actual_start]
+            p_end        = portfolio_totals_by_date[actual_end]
+            if p_start <= 0:
+                continue
 
-    if not comparisons:
+            # Earliest benchmark date >= portfolio's start; latest <= portfolio's end.
+            bench_dates = sorted(closes.keys())
+            starts = [d for d in bench_dates if d >= actual_start]
+            ends   = [d for d in bench_dates if d <= actual_end]
+            if not starts or not ends:
+                continue
+            b_start = closes[starts[0]]
+            b_end   = closes[ends[-1]]
+            if b_start <= 0:
+                continue
+
+            portfolio_pct = (p_end / p_start - 1) * 100
+            benchmark_pct = (b_end / b_start - 1) * 100
+            sym_periods[period] = {
+                "from":          actual_start,
+                "to":            actual_end,
+                "portfolio_pct": round(portfolio_pct, 2),
+                "benchmark_pct": round(benchmark_pct, 2),
+                "delta_pp":      round(portfolio_pct - benchmark_pct, 2),
+            }
+        if sym_periods:
+            out_comparisons[symbol] = sym_periods
+
+    if not out_comparisons:
         return None
 
     return {
-        "period": {
-            "from":  actual_start,
-            "to":    actual_end,
-            "label": "YTD",
-        },
-        "portfolio_start_value": round(p_start, 2),
-        "portfolio_end_value":   round(p_end, 2),
-        "default_benchmark":     DEFAULT_BENCHMARK,
-        "available_benchmarks":  AVAILABLE_BENCHMARKS,
-        "comparisons":           comparisons,
+        "default_benchmark":    DEFAULT_BENCHMARK,
+        "available_benchmarks": AVAILABLE_BENCHMARKS,
+        "default_period":       DEFAULT_BENCHMARK_PERIOD,
+        "available_periods":    BENCHMARK_PERIODS,
+        "comparisons":          out_comparisons,
     }
 
 
+def _default_benchmark_cmp(stats):
+    """Pull the (default_benchmark, default_period) comparison out of the
+    nested `comparisons` dict, falling back to whatever's available."""
+    default_bench  = stats.get("default_benchmark")
+    default_period = stats.get("default_period")
+    comps          = stats.get("comparisons") or {}
+    bench_data     = comps.get(default_bench) or next(iter(comps.values()), {})
+    return bench_data.get(default_period) or next(iter(bench_data.values()), None)
+
+
 def build_benchmark_card(stats, prose=None):
-    """Turn benchmark stats into the card payload. Returns None when no
-    benchmark crosses the delta threshold."""
+    """Turn benchmark stats into the card payload. Returns None when the
+    (default_benchmark, default_period) delta is below the threshold."""
     if not stats or not stats.get("comparisons"):
         return None
+    default_cmp = _default_benchmark_cmp(stats)
+    if not default_cmp:
+        return None
 
-    default = stats["default_benchmark"]
-    default_cmp = next(
-        (c for c in stats["comparisons"] if c["benchmark"] == default),
-        stats["comparisons"][0],
-    )
     delta = default_cmp["delta_pp"]
     abs_delta = abs(delta)
-
     if abs_delta < BENCHMARK_DELTA_THRESHOLD_PP:
         return None
 
-    severity = "critical" if abs_delta >= BENCHMARK_CRITICAL_DELTA_PP else "warn" if delta < 0 else "info"
-
+    severity  = ("critical" if abs_delta >= BENCHMARK_CRITICAL_DELTA_PP
+                 else "warn" if delta < 0 else "info")
     direction = "Trailing" if delta < 0 else "Beating"
-    headline  = f"{direction} {default_cmp['benchmark']} by {abs_delta:.1f}% YTD"
+    headline  = f"{direction} {stats['default_benchmark']} by {abs_delta:.1f}% {stats['default_period']}"
 
     return {
         "id":        "benchmark",
@@ -320,11 +347,10 @@ def build_benchmark_card(stats, prose=None):
         "cta_label": "Compare on chart",
         "prose":     prose,
         "detail": {
-            "period":               stats["period"],
             "default_benchmark":    stats["default_benchmark"],
             "available_benchmarks": stats["available_benchmarks"],
-            "portfolio_start_value": stats["portfolio_start_value"],
-            "portfolio_end_value":   stats["portfolio_end_value"],
+            "default_period":       stats["default_period"],
+            "available_periods":    stats["available_periods"],
             "comparisons":          stats["comparisons"],
             "trigger": {
                 "rule":      "abs_delta_pp_gte",
@@ -680,16 +706,17 @@ def generate_benchmark_card(prose_fn=None, benchmark_fn=None, has_portfolio=True
     if not card:
         # within threshold of benchmark — show muted empty state with the
         # actual delta in the subtitle so the user knows by how much.
-        default = stats.get("default_benchmark", "SPY")
-        default_cmp = next(
-            (c for c in stats["comparisons"] if c["benchmark"] == default),
-            stats["comparisons"][0],
-        )
-        delta = default_cmp["delta_pp"]
-        direction = "ahead of" if delta > 0 else "behind"
-        subtitle = (f"Portfolio is {abs(delta):.1f}% {direction} {default} "
-                    f"this period — within the {BENCHMARK_DELTA_THRESHOLD_PP}% threshold.")
-        return _empty_card("benchmark", subtitle_override=subtitle), 0
+        default_cmp = _default_benchmark_cmp(stats)
+        if default_cmp:
+            delta = default_cmp["delta_pp"]
+            direction = "ahead of" if delta > 0 else "behind"
+            subtitle = (
+                f"Portfolio is {abs(delta):.1f}% {direction} "
+                f"{stats['default_benchmark']} ({stats['default_period']}) — "
+                f"within the {BENCHMARK_DELTA_THRESHOLD_PP}% threshold."
+            )
+            return _empty_card("benchmark", subtitle_override=subtitle), 0
+        return _empty_card("benchmark"), 0
     claude_calls = 0
     if prose_fn is not None:
         try:

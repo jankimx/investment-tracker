@@ -355,28 +355,30 @@ Write a 2-3 sentence summary for the user's portfolio dashboard. Mention specifi
 
 def summarize_benchmark(stats, max_words=28):
     """Generate the action-framed sentence shown in the benchmark card.
-    `stats` is the dict returned by insights.compute_benchmark_comparison().
+    `stats` is the dict returned by insights.compute_benchmark_comparison()
+    — now nested as {comparisons: {symbol: {period: stats}}}.
     Returns the prose string; raises on Claude API failure (caller catches)."""
-    default = stats["default_benchmark"]
-    default_cmp = next(
-        (c for c in stats["comparisons"] if c["benchmark"] == default),
-        stats["comparisons"][0],
-    )
-    period   = stats["period"]
-    rows = "\n".join(
-        f"- {c['benchmark']}: portfolio {c['portfolio_pct']:+.2f}% vs "
-        f"benchmark {c['benchmark_pct']:+.2f}% (delta {c['delta_pp']:+.2f}pp)"
-        for c in stats["comparisons"]
-    )
+    default        = stats["default_benchmark"]
+    default_period = stats["default_period"]
+    comps          = stats.get("comparisons") or {}
 
-    prompt = f"""Portfolio vs benchmark returns over {period['label']} ({period['from']} → {period['to']}).
-Use ONLY these numbers:
+    rows = []
+    for sym, periods in comps.items():
+        for period, c in periods.items():
+            rows.append(
+                f"- {sym} {period} ({c['from']} → {c['to']}): "
+                f"portfolio {c['portfolio_pct']:+.2f}% vs benchmark "
+                f"{c['benchmark_pct']:+.2f}% (delta {c['delta_pp']:+.2f})"
+            )
+    rows_text = "\n".join(rows)
 
-{rows}
+    prompt = f"""Portfolio vs benchmark returns across multiple periods. Use ONLY these numbers:
 
-Default benchmark on the dashboard: {default}.
+{rows_text}
 
-Write one action-framed sentence (max {max_words} words) about how the portfolio is doing versus {default}. Reference at least one specific number. If portfolio is leading by a lot, suggest re-examining what's driving it; if trailing, suggest reviewing allocation. Do not give a buy/sell recommendation."""
+Default focus on the dashboard: {default} over {default_period}.
+
+Write one action-framed sentence (max {max_words} words) about how the portfolio is doing versus {default} over {default_period}. Reference at least one specific number. If portfolio is leading by a lot, suggest re-examining what is driving it; if trailing, suggest reviewing allocation. Do not give a buy/sell recommendation."""
 
     return claude_complete(prompt, INSIGHTS_SYSTEM_PROMPT, max_tokens=140).strip()
 

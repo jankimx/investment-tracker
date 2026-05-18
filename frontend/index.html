@@ -83,6 +83,15 @@
       </div>
 
       <div class="chart-controls">
+        <label>Period</label>
+        <div class="select-wrap">
+          <select id="dash-period" onchange="onChartPeriodChange()">
+            <option value="30">Past month</option>
+            <option value="90" selected>Past 3 months</option>
+            <option value="ytd">YTD</option>
+            <option value="all">All time</option>
+          </select>
+        </div>
         <label>Platform</label>
         <div class="select-wrap">
           <select id="dash-platform" onchange="renderDashboard()">
