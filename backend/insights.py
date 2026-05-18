@@ -2,17 +2,44 @@
 Dashboard insights engine.
 
 Computes the daily-cached "what's notable about your portfolio" payload that
-drives the CTA card row on the dashboard. See INSIGHTS_DESIGN.md for the
-full design.
+drives the CTA card row on the dashboard. See INSIGHTS_DESIGN.md.
 
-Pure-math + orchestration live here. Claude prose calls live in
-claude_synthesis.py so the AI-prompting code stays in one place.
+Pure-math, card builders, and per-card generators live here. Claude prose
+calls live in claude_synthesis.py. App.py owns DB I/O, cache collections,
+and the per-card workers.
 
-Phase 1 ships the concentration card only. Benchmark and risk/news cards
-follow in later phases.
+Per-card caching: each card type is keyed independently. CARD_VERSIONS lets
+us bump a single card's version to force just that card to regenerate while
+leaving the others alone.
 """
 
 from datetime import datetime
+
+
+# -- Card registry -------------------------------------------------
+# Bump a value here to force just that card to regenerate on next read.
+# Used by app.py to invalidate per-card caches.
+CARD_VERSIONS = {
+    "concentration": 1,
+    "benchmark":     1,
+    "risk_news":     1,
+}
+
+CARD_IDS = list(CARD_VERSIONS.keys())
+
+# Surfaced in the API response so the frontend can label loading
+# placeholders with something specific instead of a generic "loading...".
+CARD_DISPLAY_NAMES = {
+    "concentration": "Concentration",
+    "benchmark":     "Performance vs benchmark",
+    "risk_news":     "Risk & news",
+}
+
+CARD_LOADING_MESSAGES = {
+    "concentration": "Analyzing portfolio concentration…",
+    "benchmark":     "Comparing against benchmarks…",
+    "risk_news":     "Reviewing news and analyzer signals…",
+}
 
 
 # -- Thresholds ----------------------------------------------------
@@ -573,89 +600,73 @@ def synthesize_risk_card_verified(inputs, extract_fn, verify_fn, synthesize_fn,
     }
 
 
-# -- Orchestrator -------------------------------------------------
-def generate_insights(positions, prose_fn=None, benchmark_fn=None,
-                      risk_fn=None, trigger="lazy"):
-    """Assemble today's insights document.
+# -- Per-card generators -----------------------------------------
+# Each returns (payload_or_None, claude_calls). payload is the card dict
+# if it would render, or None if it didn't trigger (threshold not met /
+# no input data). Callers cache the result under the card's version so a
+# null payload also counts as "generated, just not shown" — avoiding
+# redundant re-runs within the day.
 
-    Args:
-        positions:     list of derived positions (from derive_all_positions()).
-        prose_fn:      optional callable(card_id, stats) -> str.
-                       Generates Claude-written prose per card. May raise;
-                       on exception we log and ship the card with prose=None.
-        benchmark_fn:  optional callable() -> (portfolio_totals_by_date,
-                       benchmark_closes_by_symbol). Caller provides this
-                       (it needs DB / FMP access). May raise; on exception
-                       the benchmark card is skipped.
-        risk_fn:       optional callable(positions) -> {items, prose,
-                       verification, claude_calls} (the output of
-                       synthesize_risk_card_verified). Caller wires the
-                       Claude extract/verify/synthesize functions in.
-                       Returns None when there are no inputs to summarize.
-        trigger:       "lazy", "cron", or "manual" — recorded for telemetry.
-
-    Returns the document body to be stored in the `insights` collection
-    (caller wraps with _id = today).
-    """
-    started      = datetime.utcnow()
+def generate_concentration_card(positions, prose_fn=None):
+    stats = compute_concentration(positions)
+    if not stats:
+        return None, 0
+    card = build_concentration_card(stats, prose=None)
+    if not card:
+        return None, 0
     claude_calls = 0
-    cards        = []
-
-    def _attach(card_id, stats, builder):
-        """Build the card without prose first (cheap threshold check). Only
-        if it would render do we burn a Claude call for the prose."""
-        nonlocal claude_calls
-        card = builder(stats, prose=None)
-        if not card:
-            return
-        if prose_fn is not None:
-            try:
-                card["prose"] = prose_fn(card_id, stats)
-                claude_calls += 1
-            except Exception as e:
-                print(f"[Insights] {card_id} prose failed: {type(e).__name__}: {e}")
-        cards.append(card)
-
-    concentration_stats = compute_concentration(positions)
-    if concentration_stats:
-        _attach("concentration", concentration_stats, build_concentration_card)
-
-    if benchmark_fn is not None:
+    if prose_fn is not None:
         try:
-            portfolio_totals, benchmark_closes = benchmark_fn()
-            benchmark_stats = compute_benchmark_comparison(portfolio_totals, benchmark_closes)
+            card["prose"] = prose_fn("concentration", stats)
+            claude_calls += 1
         except Exception as e:
-            print(f"[Insights] Benchmark data fetch failed: {type(e).__name__}: {e}")
-            benchmark_stats = None
-        if benchmark_stats:
-            _attach("benchmark", benchmark_stats, build_benchmark_card)
+            print(f"[Insights] concentration prose failed: {type(e).__name__}: {e}")
+    return card, claude_calls
 
-    # Risk / news card uses its own verified-output pipeline (write -> verify
-    # loop with conservative fallback). Prose is generated INSIDE that
-    # pipeline, so we don't go through _attach / prose_fn here.
-    if risk_fn is not None:
+
+def generate_benchmark_card(prose_fn=None, benchmark_fn=None):
+    if benchmark_fn is None:
+        return None, 0
+    try:
+        portfolio_totals, benchmark_closes = benchmark_fn()
+    except Exception as e:
+        print(f"[Insights] benchmark data fetch failed: {type(e).__name__}: {e}")
+        return None, 0
+    stats = compute_benchmark_comparison(portfolio_totals, benchmark_closes)
+    if not stats:
+        return None, 0
+    card = build_benchmark_card(stats, prose=None)
+    if not card:
+        return None, 0
+    claude_calls = 0
+    if prose_fn is not None:
         try:
-            verified = risk_fn(positions)
+            card["prose"] = prose_fn("benchmark", stats)
+            claude_calls += 1
         except Exception as e:
-            print(f"[Insights] Risk pipeline failed: {type(e).__name__}: {e}")
-            verified = None
-        if verified:
-            claude_calls += verified.get("claude_calls", 0)
-            card = build_risk_card(verified, prose=verified.get("prose"))
-            if card:
-                cards.append(card)
+            print(f"[Insights] benchmark prose failed: {type(e).__name__}: {e}")
+    return card, claude_calls
 
-    finished = datetime.utcnow()
 
-    return {
-        "generated_at": started.isoformat(),
-        "generation": {
-            "trigger":      trigger,
-            "duration_ms":  int((finished - started).total_seconds() * 1000),
-            "claude_calls": claude_calls,
-        },
-        "inputs": {
-            "holdings_count": len([p for p in positions if (p.get("value") or 0) > 0]),
-        },
-        "cards": cards,
-    }
+def generate_risk_news_card(risk_fn=None):
+    """risk_fn is expected to bundle collect_risk_inputs +
+    synthesize_risk_card_verified into a no-arg closure. Returns None when
+    there's nothing to summarize."""
+    if risk_fn is None:
+        return None, 0
+    try:
+        verified = risk_fn()
+    except Exception as e:
+        print(f"[Insights] risk pipeline failed: {type(e).__name__}: {e}")
+        return None, 0
+    if not verified:
+        return None, 0
+    card = build_risk_card(verified, prose=verified.get("prose"))
+    return card, verified.get("claude_calls", 0)
+
+
+CARD_GENERATORS = {
+    "concentration": generate_concentration_card,
+    "benchmark":     generate_benchmark_card,
+    "risk_news":     generate_risk_news_card,
+}

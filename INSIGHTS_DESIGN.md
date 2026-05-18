@@ -39,29 +39,41 @@ Surface three call-to-action cards at the top of the dashboard that help drive d
 
 ## 3. Data model
 
-### 3.1 New collection: `insights`
+### 3.1 Per-card collections
 
-One document per day. Read on every dashboard load.
+One **collection per card type**, each keyed by date. Replaces the original "one daily doc per day" design — see §3.4 for why.
+
+| Collection | Card |
+|---|---|
+| `insights_concentration` | Concentration |
+| `insights_benchmark`     | Benchmark    |
+| `insights_risk_news`     | Risk / news  |
+
+Every doc has the same envelope:
 
 ```jsonc
 {
-  "_id": "2026-05-17",                          // date string, primary key
-  "generated_at": "2026-05-17T20:32:11Z",       // ISO 8601 UTC
-  "generation": {
-    "trigger": "cron",                          // "cron" | "lazy"
-    "duration_ms": 12500,
-    "claude_calls": 5                           // 1 benchmark + 1 concentration + 3 risk/news
-  },
+  "_id":          "2026-05-17",      // date string, primary key
+  "version":      1,                 // matches insights.CARD_VERSIONS[card_id] at generation time
+  "generated_at": "2026-05-17T20:32:11Z",
+  "duration_ms":  4821,
+  "claude_calls": 1,
+  "trigger":      "cron",            // "cron" | "lazy" | "manual"
+  "payload":      { ... }            // the card dict (§3.3) — OR null if it didn't trigger
+}
+```
 
-  "inputs": {
-    "holdings_count": 12,
-    "prices_as_of":   "2026-05-17",
-    "analyses_used":  ["AAPL", "NVDA", "TSLA"],
-    "news_window_days": 7,
-    "risk_news_extract": { /* intermediate JSON from extract pass — see §6 */ }
-  },
+`payload: null` is a valid cached result — it means "we evaluated this card today and there's nothing to render." The frontend omits it; the worker doesn't redo it within the day. Bump `insights.CARD_VERSIONS[card_id]` to force just that card to regen.
 
-  "cards": [
+### 3.2 Card payloads
+
+The body of `payload` differs per card type but follows the original §3.2 shapes (concentration / benchmark / risk_news). The wrapper is the same — only `payload` varies.
+
+```jsonc
+// historical: when the design was "one doc with all cards", this was the
+// cards[] array body. Now the same body is stored per-card under
+// insights_<card_id>.payload. See §3.3.
+"cards": [
     // ─── CARD 1: BENCHMARK ───
     {
       "id": "benchmark",
@@ -175,64 +187,81 @@ Mirrors the `prices` pattern. Per-symbol, per-date document so multiple consumer
 ### 3.4 Indexes
 
 ```js
-db.insights.createIndex({ _id: 1 })             // primary, implicit
-db.insights.createIndex({ generated_at: -1 })   // debug "show me last N days"
+// Each per-card collection — primary _id is implicit, secondary for debugging.
+["insights_concentration", "insights_benchmark", "insights_risk_news"].forEach(c => {
+  db[c].createIndex({ generated_at: -1 })       // "show me last N days"
+});
 db.news.createIndex({ symbol: 1, date: -1 })    // drill-down lookups
 ```
+
+### 3.5 Why per-card collections (rather than one daily doc)
+
+The original design stored all three cards under a single `insights[YYYY-MM-DD]` document. After Phase 3 shipped we hit the predictable failure: deploying a new card type didn't update yesterday's-still-cached doc, so the new card never appeared until the next day's cron. Switching to one collection per card type fixes this:
+
+- **Independent invalidation.** Bump `CARD_VERSIONS[card_id]` in code → only that card regenerates on next read; the others stay cached.
+- **Independent generation.** Per-card locks let the three cards generate **concurrently** on a cold start. Total wait shrinks from "sum of all card times" to "slowest single card."
+- **Independent failure.** A Claude/FMP failure on one card doesn't block the others from rendering.
+- **Independent loading UX.** Each card slot shows its own labeled placeholder while it generates — see §4.1.
+
+The deprecated `insights` collection is no longer read or written. Old data can be dropped manually; the code ignores it.
 
 ---
 
 ## 4. Read path
 
-`GET /insights/dashboard` is the only call the frontend makes for the CTA row. It returns one of two states:
+`GET /insights/dashboard` returns one entry per expected card. Each entry has its own `status`. Cards that have been generated but didn't trigger (payload=null) are omitted entirely.
 
 ```jsonc
-// Ready — the common path
-{ "status": "ready",      "as_of": "2026-05-17T20:32:11Z", "cards": [...] }
-
-// Generating — lazy fallback was triggered, work is in progress
-{ "status": "generating", "started_at": "2026-05-17T22:15:01Z", "cards": [] }
+{
+  "as_of": "2026-05-17T20:32:11Z",          // newest generated_at across the cached cards
+  "cards": [
+    { "id": "concentration", "status": "ready", "show": true, "severity": "warn", "headline": "...", ... },
+    { "id": "benchmark",     "status": "generating", "display_name": "Performance vs benchmark",
+      "loading_message": "Comparing against benchmarks…" },
+    // risk_news was generated and didn't trigger — omitted
+  ],
+  "generating": ["benchmark"]                // convenience: card_ids still being built
+}
 ```
 
 ```
 GET /insights/dashboard
-  ├─ insights[today] exists?
-  │     ├─ yes → return { status: "ready", cards: [...] }
-  │     └─ no  → claim lock + spawn background generation, return { status: "generating" }
-  │              (if another request already holds the lock, just return "generating")
+  for each card_id in CARD_VERSIONS:
+    look up insights_<card_id>[today]
+      ├─ hit + cached version == current version → emit { status: "ready", ...payload }
+      │                                              (omit if payload is null / show is false)
+      └─ miss or version stale → claim per-card lock, spawn worker, emit { status: "generating", ... }
 ```
 
-Filtered server-side to only include cards with `show: true`. Frontend has no business logic — it renders what it gets.
+No business logic on the client — the frontend renders whatever the server returns, in the order returned.
 
-### 4.1 Frontend polling
+### 4.1 Frontend polling + per-card placeholders
 
-When the first response is `status: "generating"`, the frontend renders a placeholder strip and polls the same endpoint with **exponential backoff**:
-
-```
-attempt:  1    2    3    4    5    6    7+
-wait:     1s   2s   4s   8s   16s  32s  60s (capped)
-```
-
-Polling continues while the tab is open. No hard timeout — backoff caps at 60s so it doesn't hammer. On `status: "ready"`, the strip is replaced with the actual cards.
+For each `status: "generating"` entry the frontend renders a labeled placeholder card in that slot, with the server-supplied `display_name` and `loading_message`. Cached cards render their full content immediately. Polling continues only while `generating` is non-empty, with **exponential backoff** (1, 2, 4, 8, 16, 32s, capped at 60s) — backoff resets to 1s whenever the generating set changes so we catch transitions promptly.
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│ 🔄 Generating today's insights — usually ready in 10-15 seconds.   │
-└────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────┐  ┌──────────────────────────────┐  ┌──────────────────────────────┐
+│ Concentration                │  │ Performance vs benchmark     │  │ Risk & news                  │
+│ AAPL is 32% of your portfolio│  │ Comparing against           │  │ 2 holdings with notable     │
+│ ...                          │  │ benchmarks...                │  │ activity                     │
+│ [View allocation]            │  │                              │  │ [View summary]               │
+└──────────────────────────────┘  └──────────────────────────────┘  └──────────────────────────────┘
+       ↑ ready (cached)                  ↑ still generating                ↑ ready (cached)
 ```
 
-A single full-width strip (not three skeleton cards) is used because card count isn't known yet — three skeletons collapsing to one would feel broken.
+Cards sort by severity (`critical → warn → info`); placeholders sort to the end (no severity) and slot into their proper position once the real payload arrives.
 
 ### 4.2 Concurrent-generation protection
 
-The lazy-generation lock lives in the existing `meta` collection. Each lock document carries an explicit `expires_at` ~120s in the future, and a TTL index on that field auto-deletes the doc once it's in the past — so a crashed worker doesn't leave a stuck lock:
+Per-card locks in the existing `meta` collection. Each lock document carries an explicit `expires_at` ~180s in the future (generous because the risk card can run a multi-pass Claude loop), and a TTL index on that field auto-deletes the doc once it's in the past.
 
 ```jsonc
 {
-  "_id":        "insights_lock_2026-05-17",
+  "_id":        "insights_lock_benchmark_2026-05-17",
   "started_at": ISODate("2026-05-17T22:15:01Z"),
-  "expires_at": ISODate("2026-05-17T22:17:01Z"),
-  "pid":        12345
+  "expires_at": ISODate("2026-05-17T22:18:01Z"),
+  "pid":        12345,
+  "card_id":    "benchmark"
 }
 ```
 
@@ -240,9 +269,11 @@ The lazy-generation lock lives in the existing `meta` collection. Each lock docu
 db.meta.createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 })
 ```
 
-Why `expireAfterSeconds: 0` on `expires_at` instead of a per-collection TTL on `started_at`? MongoDB's TTL index applies to every doc in the collection that has the indexed field as a date — but existing meta docs (`refresh_tick_*`, `schema_migration_v2`, etc.) don't have `expires_at`, so the TTL ignores them. Cleaner than filtering by an `_id` regex (which `partialFilterExpression` doesn't support anyway).
+Why `expireAfterSeconds: 0` on `expires_at` instead of a per-collection TTL? MongoDB's TTL applies to every doc with the indexed field as a date — existing meta docs (`refresh_tick_*`, `schema_migration_v2`, etc.) don't have `expires_at`, so the TTL ignores them. Cleaner than `_id` regex filtering (which `partialFilterExpression` doesn't support anyway).
 
-First request that misses inserts the lock and spawns the worker thread; subsequent requests see the lock (`DuplicateKeyError`) and return `generating` without spawning a second worker. When the worker finishes it deletes the lock. If the process crashes mid-generation, Mongo cleans the lock up automatically once `expires_at` passes.
+Per-card locks mean the three cards generate **concurrently** on a cold start, so the total wait equals the slowest single card. First request to claim each lock spawns its worker; subsequent requests see the lock (`DuplicateKeyError`) and return `generating` without spawning a duplicate. When a worker finishes it deletes its own lock. Crashed workers are cleaned up automatically by TTL.
+
+Each card also has an in-process `threading.Lock` (lazy-init dict keyed by `card_id`) so a single worker process can't accidentally spawn two threads for the same card. The Mongo lock handles cross-worker dedup; the in-process lock handles same-worker races.
 
 ---
 
@@ -259,44 +290,42 @@ scheduler.add_job(_scheduled_insights, "cron",
                   timezone="America/New_York")
 
 def _scheduled_insights():
-    today = date.today().isoformat()
-    try:
-        meta.insert_one({"_id": f"insights_tick_{today}"})  # multi-worker dedup
-    except DuplicateKeyError:
-        return
-    generate_insights(today)
+    today = today_str()
+    for card_id in CARD_IDS:
+        # Cron clears any cached lock so it can re-claim and force regen
+        # (daily refresh deliberately invalidates yesterday's caches).
+        _release_card_lock(today, card_id)
+        _spawn_card_generation(today, card_id, trigger="cron")
 ```
 
 ### 5.2 Lazy fallback
 
-If the cron didn't run (weekend, holiday, outage, fresh deploy), the first dashboard load of the day generates inline. Same `generate_insights()` function, same per-process lock that the existing `do_refresh()` uses to prevent concurrent doubles.
+If the cron didn't run (weekend, holiday, outage, fresh deploy), the first dashboard load of the day calls `_spawn_card_generation` for each stale card. Same worker, same lock pattern — the only difference is `trigger="lazy"` for telemetry.
 
-**Trade-off the user accepted:** weekends and holidays trigger a ~10s first-load on Saturday/Sunday because we chose freshness over caching Friday's doc. Acceptable for a personal app.
+**Trade-off the user accepted:** weekends and holidays trigger generation on first load. Per-card parallelism keeps the wait to the slowest single card (~5-30s for risk_news, much less for the others).
 
-### 5.3 The generator
+### 5.3 The per-card worker
 
 ```python
-def generate_insights(today):
-    holdings   = load_holdings_with_prices()
-    benchmarks = fetch_or_cache_prices(["SPY", "QQQ", "VTI"])
-    news       = fetch_or_cache_news([h.symbol for h in holdings])
-    analyses   = load_cached_analyses([h.symbol for h in holdings])
-
-    # Pure-math (cheap, deterministic):
-    concentration_stats = compute_concentration(holdings)
-    benchmark_stats     = compute_relative_return(holdings, benchmarks)
-    risk_items_raw      = collate_signals(news, analyses)
-
-    # AI synthesis:
-    prose_benchmark     = claude_summarize_benchmark(benchmark_stats)
-    prose_concentration = claude_summarize_concentration(concentration_stats)
-    risk_card           = generate_risk_news_verified(news, analyses, risk_items_raw)  # see §6
-
-    doc = build_cards(concentration_stats, benchmark_stats, risk_card,
-                      prose_benchmark, prose_concentration)
-    insights.replace_one({"_id": today}, {"_id": today, **doc}, upsert=True)
-    return doc
+def _generate_one_card_and_persist(today, card_id, trigger):
+    # acquired the in-process lock for this card
+    payload, claude_calls = CARD_GENERATORS[card_id](positions, ...closures...)
+    CARD_COLLECTIONS[card_id].replace_one(
+        {"_id": today},
+        {
+            "_id":          today,
+            "version":      CARD_VERSIONS[card_id],
+            "generated_at": ...,
+            "duration_ms":  ...,
+            "claude_calls": claude_calls,
+            "trigger":      trigger,
+            "payload":      payload,    # may be None (computed but didn't trigger)
+        },
+        upsert=True,
+    )
 ```
+
+Generators (`generate_concentration_card`, `generate_benchmark_card`, `generate_risk_news_card`) live in `insights.py` and return `(payload, claude_calls)`. App.py wires in the Claude prose/extract/verify/synthesize callables and the FMP-backed `benchmark_fn` / `fetch_news` closures.
 
 ---
 
@@ -375,8 +404,10 @@ All `@require_auth`, bearer token same as existing routes.
 | Verification can't ground full output | Falls back to conservative mode (strict citation rule); card renders with `⚠ conservative` badge |
 | Conservative mode also produces nothing | Card omitted entirely (`show: false`); never ships un-grounded prose |
 | User holds nothing | `cards: []`, row doesn't render |
-| Cron misses (weekend/outage) | First dashboard load lazily regenerates (~10s) |
-| Two workers race the cron | `meta.insert_one("insights_tick_<date>")` ensures only one runs |
+| Cron misses (weekend/outage) | First dashboard load spawns per-card lazy regeneration |
+| Two workers race a card | Per-card `meta.insert_one("insights_lock_<card>_<date>")` ensures only one runs that card |
+| Single card fails | Other cards still render; the failed slot stays as a "generating" placeholder until next retry |
+| Deploy adds new card | New card auto-regens on next read (its cache is missing); existing cards keep serving from cache |
 
 ---
 

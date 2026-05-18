@@ -1734,20 +1734,29 @@ async function refreshAnalysis(symbol) {
 const INSIGHTS_BACKOFF_START_MS = 1000;
 const INSIGHTS_BACKOFF_CAP_MS   = 60000;
 
-let _insightsPollTimer = null;
-let _insightsBackoffMs = INSIGHTS_BACKOFF_START_MS;
+let _insightsPollTimer  = null;
+let _insightsBackoffMs  = INSIGHTS_BACKOFF_START_MS;
+let _lastGeneratingSet  = new Set();
 
 async function loadInsights() {
   try {
     const data = await api('/insights/dashboard');
-    if (data.status === 'ready') {
-      _stopInsightsPolling();
+    const entries        = data.cards || [];
+    const generatingNow  = new Set(data.generating || []);
+
+    // Reset backoff if the generating set changed (a card finished or a
+    // new one was kicked off) so we poll quickly through the transition.
+    const setsEqual = generatingNow.size === _lastGeneratingSet.size
+      && [...generatingNow].every(x => _lastGeneratingSet.has(x));
+    if (!setsEqual) {
       _insightsBackoffMs = INSIGHTS_BACKOFF_START_MS;
-      renderCtaRow(data.cards || []);
-    } else if (data.status === 'generating') {
-      renderCtaLoading();
-      _scheduleInsightsPoll();
     }
+    _lastGeneratingSet = generatingNow;
+
+    renderCtaRow(entries);
+
+    if (generatingNow.size > 0) _scheduleInsightsPoll();
+    else _stopInsightsPolling();
   } catch (e) {
     console.error('Failed to load insights:', e);
     _stopInsightsPolling();
@@ -1757,7 +1766,7 @@ async function loadInsights() {
 }
 
 function _scheduleInsightsPoll() {
-  _stopInsightsPolling();
+  if (_insightsPollTimer) clearTimeout(_insightsPollTimer);
   const delay = _insightsBackoffMs;
   _insightsPollTimer = setTimeout(() => {
     _insightsBackoffMs = Math.min(_insightsBackoffMs * 2, INSIGHTS_BACKOFF_CAP_MS);
@@ -1774,18 +1783,46 @@ function _stopInsightsPolling() {
 
 const SEVERITY_ORDER = { critical: 0, warn: 1, info: 2 };
 
-function renderCtaRow(cards) {
+function renderCtaRow(entries) {
   const row = document.getElementById('cta-row');
   if (!row) return;
   row.replaceChildren();
-  if (!cards.length) {
+  if (!entries.length) {
     row.hidden = true;
     return;
   }
-  [...cards]
+  // Sort by severity; generating placeholders (no severity) sort to the end.
+  // After a placeholder transitions to a ready card it slots into its
+  // severity-based position.
+  [...entries]
     .sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 99) - (SEVERITY_ORDER[b.severity] ?? 99))
-    .forEach(c => row.appendChild(buildCtaCard(c)));
+    .forEach(entry => {
+      const node = entry.status === 'generating'
+        ? buildLoadingCard(entry)
+        : buildCtaCard(entry);
+      row.appendChild(node);
+    });
   row.hidden = false;
+}
+
+function buildLoadingCard(entry) {
+  const wrap = document.createElement('div');
+  wrap.className = 'cta-card cta-loading-card';
+
+  const headline = document.createElement('div');
+  headline.className = 'cta-card-headline';
+  headline.textContent = entry.display_name || 'Loading';
+  wrap.appendChild(headline);
+
+  const msg = document.createElement('div');
+  msg.className = 'cta-loading-msg';
+  msg.appendChild(document.createTextNode(entry.loading_message || 'Generating…'));
+  const dots = document.createElement('span');
+  dots.className = 'cta-loading-dots';
+  dots.textContent = '...';
+  msg.appendChild(dots);
+  wrap.appendChild(msg);
+  return wrap;
 }
 
 function buildCtaCard(card) {
@@ -1931,17 +1968,6 @@ function _signPct(n) {
   if (n == null) return '--';
   const sign = n >= 0 ? '+' : '';
   return sign + n.toFixed(2) + '%';
-}
-
-function renderCtaLoading() {
-  const row = document.getElementById('cta-row');
-  if (!row) return;
-  row.replaceChildren();
-  const strip = document.createElement('div');
-  strip.className = 'cta-loading';
-  strip.textContent = 'Generating today’s insights — usually ready in 10-15 seconds.';
-  row.appendChild(strip);
-  row.hidden = false;
 }
 
 // -- Drawer ------------------------------------------------

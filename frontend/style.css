@@ -385,14 +385,26 @@ tr:hover td { background: var(--bg2); }
 }
 .cta-card-btn:hover { color: var(--text); border-color: var(--text3); }
 
-.cta-loading {
-  grid-column: 1 / -1;
-  padding: 14px 16px;
-  background: var(--bg2);
-  border: 1px dashed var(--border2);
-  border-radius: var(--radius);
-  font-size: 12px; color: var(--text2);
-  text-align: center;
+.cta-loading-card {
+  border-left: 3px dashed var(--text3);
+  opacity: 0.85;
+}
+.cta-loading-card .cta-card-headline {
+  color: var(--text2);
+}
+.cta-loading-msg {
+  font-size: 12px;
+  color: var(--text3);
+  line-height: 1.5;
+}
+@keyframes cta-loading-dots {
+  0%, 20%   { opacity: 0.2; }
+  50%       { opacity: 0.8; }
+  80%, 100% { opacity: 0.2; }
+}
+.cta-loading-dots {
+  display: inline-block;
+  animation: cta-loading-dots 1.4s infinite ease-in-out;
 }
 
 /* Benchmark card has its own mini-table + dropdown */

@@ -48,8 +48,17 @@ balances = db["balances"]     # NEW: source of truth for snapshot-tracked positi
 meta     = db["meta"]
 analyses = db["analyses"]
 sessions = db["sessions"]
-insights = db["insights"]    # NEW: one document per day, drives the dashboard CTA row
-news     = db["news"]        # NEW: per-symbol-per-day cache of stock_news headlines
+news     = db["news"]        # per-symbol-per-day cache of stock_news headlines
+# Per-card insights cache. Each collection holds {_id: "YYYY-MM-DD",
+# version, generated_at, duration_ms, claude_calls, payload}. Keyed by
+# card_id from insights.CARD_VERSIONS so adding a new card just adds a
+# new collection key here. The legacy single `insights` collection is no
+# longer read or written; old data in it can be dropped manually.
+CARD_COLLECTIONS = {
+    "concentration": db["insights_concentration"],
+    "benchmark":     db["insights_benchmark"],
+    "risk_news":     db["insights_risk_news"],
+}
 
 # Create indexes once at startup
 try:
@@ -1432,32 +1441,45 @@ def refresh_status():
 # doc is missing (weekends, outages, fresh deploy). Concurrent generation is
 # de-duped by a TTL-protected lock document in `meta`.
 
-_insights_lock = threading.Lock()  # in-process guard against double-spawning
+# Per-card in-process locks so a single worker can't accidentally spawn two
+# threads for the same (date, card). Lazy-init keyed by card_id.
+_card_local_locks = {}
+
+
+def _local_card_lock(card_id):
+    lock = _card_local_locks.get(card_id)
+    if lock is None:
+        lock = threading.Lock()
+        _card_local_locks[card_id] = lock
+    return lock
+
 
 def _today_str():
     return datetime.utcnow().strftime("%Y-%m-%d")
 
 
-def _claim_insights_lock(today):
-    """Atomically claim the cross-worker lock for today's generation.
-    Returns (claimed, started_at) where started_at is the lock's timestamp
-    (whether we claimed it or someone else holds it)."""
+def _claim_card_lock(today, card_id):
+    """Atomically claim the cross-worker lock for one card's generation on
+    `today`. Returns (claimed, started_at). Other workers see DuplicateKeyError
+    and return claimed=False; their started_at is the existing lock's timestamp."""
     now = datetime.utcnow()
+    lock_id = f"insights_lock_{card_id}_{today}"
     try:
         meta.insert_one({
-            "_id":        f"insights_lock_{today}",
+            "_id":        lock_id,
             "started_at": now,
-            "expires_at": now + timedelta(seconds=120),
+            "expires_at": now + timedelta(seconds=180),  # generous; risk card can take a while
             "pid":        os.getpid(),
+            "card_id":    card_id,
         })
         return True, now
     except DuplicateKeyError:
-        existing = meta.find_one({"_id": f"insights_lock_{today}"})
+        existing = meta.find_one({"_id": lock_id})
         return False, (existing.get("started_at") if existing else now)
 
 
-def _release_insights_lock(today):
-    meta.delete_one({"_id": f"insights_lock_{today}"})
+def _release_card_lock(today, card_id):
+    meta.delete_one({"_id": f"insights_lock_{card_id}_{today}"})
 
 
 NEWS_WINDOW_DAYS = 7
@@ -1535,8 +1557,8 @@ def _load_benchmark_data_for_insights():
     """Build the inputs that insights.compute_benchmark_comparison() expects.
 
     Returns (portfolio_totals_by_date, benchmark_closes_by_symbol). May raise
-    on price-fetch failures -- caller (generate_insights) catches and skips
-    the benchmark card."""
+    on price-fetch failures -- caller (insights.generate_benchmark_card)
+    catches and skips the benchmark card."""
     ytd_start = _ytd_start_date()
 
     # Make sure each benchmark has historical bars back to YTD. ensure_price_
@@ -1570,124 +1592,183 @@ def _load_benchmark_data_for_insights():
     return portfolio_totals, benchmark_closes
 
 
-def _generate_and_persist_insights(today, trigger):
-    """Compute today's insights and upsert into the `insights` collection.
-    Holds the in-process lock so a single worker can't spawn two generations.
-    Always releases the Mongo lock (and the local lock) on exit."""
-    if not _insights_lock.acquire(blocking=False):
-        # Another thread in this process is already generating. Don't drop
-        # the Mongo lock -- the running thread owns it.
-        print(f"[Insights] In-process generation already running, skipping")
-        return
-    try:
-        from insights import (
-            generate_insights,
-            collect_risk_inputs,
-            synthesize_risk_card_verified,
-        )
-        from claude_synthesis import (
-            summarize_concentration,
-            summarize_benchmark,
-            extract_risk_items,
-            verify_risk_items,
-            synthesize_risk_prose,
-        )
+def _build_card_closures(positions):
+    """Wire up the Claude + DB callables that the per-card generators need.
+    Constructed once per worker call so we don't re-import on every card."""
+    from insights import collect_risk_inputs, synthesize_risk_card_verified
+    from claude_synthesis import (
+        summarize_concentration,
+        summarize_benchmark,
+        extract_risk_items,
+        verify_risk_items,
+        synthesize_risk_prose,
+    )
 
-        def prose_fn(card_id, stats):
-            if card_id == "concentration":
-                return summarize_concentration(stats)
-            if card_id == "benchmark":
-                return summarize_benchmark(stats)
+    def prose_fn(card_id, stats):
+        if card_id == "concentration":
+            return summarize_concentration(stats)
+        if card_id == "benchmark":
+            return summarize_benchmark(stats)
+        return None
+
+    def get_latest_analysis(sym):
+        return analyses.find_one({"symbol": sym}, sort=[("analyzed_at", DESCENDING)])
+
+    def risk_pipeline():
+        inputs = collect_risk_inputs(positions, fetch_news, get_latest_analysis)
+        if not inputs.get("by_symbol"):
             return None
-
-        def get_latest_analysis(sym):
-            return analyses.find_one({"symbol": sym}, sort=[("analyzed_at", DESCENDING)])
-
-        def risk_fn(positions):
-            inputs = collect_risk_inputs(positions, fetch_news, get_latest_analysis)
-            if not inputs.get("by_symbol"):
-                return None
-            return synthesize_risk_card_verified(
-                inputs,
-                extract_fn=extract_risk_items,
-                verify_fn=verify_risk_items,
-                synthesize_fn=synthesize_risk_prose,
-            )
-
-        positions = derive_all_positions()
-        doc = generate_insights(
-            positions,
-            prose_fn=(prose_fn if CLAUDE_KEY else None),
-            benchmark_fn=_load_benchmark_data_for_insights,
-            risk_fn=(risk_fn if CLAUDE_KEY else None),
-            trigger=trigger,
+        return synthesize_risk_card_verified(
+            inputs,
+            extract_fn=extract_risk_items,
+            verify_fn=verify_risk_items,
+            synthesize_fn=synthesize_risk_prose,
         )
-        insights.replace_one({"_id": today}, {"_id": today, **doc}, upsert=True)
-        print(
-            f"[Insights] {trigger} generation complete for {today}: "
-            f"{len(doc['cards'])} cards, "
-            f"{doc['generation']['claude_calls']} claude calls, "
-            f"{doc['generation']['duration_ms']}ms"
-        )
-    except Exception as e:
-        import traceback
-        print(f"[Insights] Generation failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")
-    finally:
-        _release_insights_lock(today)
-        _insights_lock.release()
 
-
-def _serialize_insights(doc):
-    """Strip Mongo internals and filter to renderable cards."""
-    cards = [c for c in doc.get("cards", []) if c.get("show")]
     return {
-        "status":     "ready",
-        "as_of":      doc.get("generated_at"),
-        "generation": doc.get("generation"),
-        "cards":      cards,
+        "prose_fn":     prose_fn if CLAUDE_KEY else None,
+        "benchmark_fn": _load_benchmark_data_for_insights,
+        "risk_fn":      risk_pipeline if CLAUDE_KEY else None,
     }
 
 
-def _generating_response(started_at):
-    """Standard payload returned while generation is in flight."""
-    if isinstance(started_at, datetime):
-        started_at = started_at.replace(microsecond=0).isoformat() + "Z"
-    return {"status": "generating", "started_at": started_at, "cards": []}
+def _generate_one_card_and_persist(today, card_id, trigger):
+    """Generate one card type and upsert into its collection. Idempotent: if
+    another thread/worker is generating this card, we exit. Always releases
+    both the in-process and Mongo lock on exit."""
+    local_lock = _local_card_lock(card_id)
+    if not local_lock.acquire(blocking=False):
+        print(f"[Insights/{card_id}] in-process generation already running, skipping")
+        return
+    try:
+        from insights import (
+            CARD_VERSIONS,
+            generate_concentration_card,
+            generate_benchmark_card,
+            generate_risk_news_card,
+        )
+
+        started   = datetime.utcnow()
+        positions = derive_all_positions()
+        closures  = _build_card_closures(positions)
+
+        if card_id == "concentration":
+            payload, calls = generate_concentration_card(positions, closures["prose_fn"])
+        elif card_id == "benchmark":
+            payload, calls = generate_benchmark_card(
+                prose_fn=closures["prose_fn"],
+                benchmark_fn=closures["benchmark_fn"],
+            )
+        elif card_id == "risk_news":
+            payload, calls = generate_risk_news_card(closures["risk_fn"])
+        else:
+            print(f"[Insights] Unknown card_id '{card_id}' — skipping")
+            return
+
+        finished    = datetime.utcnow()
+        duration_ms = int((finished - started).total_seconds() * 1000)
+
+        CARD_COLLECTIONS[card_id].replace_one(
+            {"_id": today},
+            {
+                "_id":          today,
+                "version":      CARD_VERSIONS[card_id],
+                "generated_at": started.isoformat(),
+                "duration_ms":  duration_ms,
+                "claude_calls": calls,
+                "trigger":      trigger,
+                "payload":      payload,  # may be None (computed but no card to render)
+            },
+            upsert=True,
+        )
+        shown = bool(payload and payload.get("show"))
+        print(
+            f"[Insights/{card_id}] {trigger} done in {duration_ms}ms "
+            f"(claude_calls={calls}, show={shown})"
+        )
+    except Exception as e:
+        import traceback
+        print(f"[Insights/{card_id}] generation failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+    finally:
+        _release_card_lock(today, card_id)
+        local_lock.release()
+
+
+def _spawn_card_generation(today, card_id, trigger):
+    """Claim the lock for (today, card_id) and spawn a worker if we got it.
+    Returns the started_at timestamp of whichever lock is currently held."""
+    claimed, started_at = _claim_card_lock(today, card_id)
+    if claimed:
+        threading.Thread(
+            target=_generate_one_card_and_persist,
+            args=(today, card_id, trigger),
+            daemon=True,
+        ).start()
+    return started_at
 
 
 def _scheduled_insights():
-    """Daily cron — fires at 16:30 ET Mon-Fri. Uses the same lock as the
-    lazy path so manual + cron + multi-worker can't double-generate."""
+    """Daily cron — 16:30 ET Mon-Fri. Forces regeneration of every card so
+    each gets a fresh take on today's news/prices/positions. Per-card locks
+    let the three cards generate concurrently."""
+    from insights import CARD_IDS
     today = _today_str()
-    if insights.find_one({"_id": today}, {"_id": 1}):
-        return  # already generated today (manual or earlier worker)
-    claimed, _ = _claim_insights_lock(today)
-    if not claimed:
-        return  # another worker beat us to it
-    print(f"[Insights] pid={os.getpid()} starting cron generation for {today}")
-    threading.Thread(
-        target=_generate_and_persist_insights,
-        args=(today, "cron"),
-        daemon=True,
-    ).start()
+    print(f"[Insights] pid={os.getpid()} cron firing for {today}")
+    for card_id in CARD_IDS:
+        # Force regen even if today's doc already matches version — cron is
+        # the daily "freshen everything" pass.
+        _release_card_lock(today, card_id)
+        _spawn_card_generation(today, card_id, trigger="cron")
 
 
 @app.route("/insights/dashboard", methods=["GET"])
 @require_auth
 def insights_dashboard():
-    today = _today_str()
-    doc = insights.find_one({"_id": today})
-    if doc:
-        return jsonify(_serialize_insights(doc))
+    """Per-card response: each entry has its own status (ready or generating).
+    Cards that have been generated but didn't trigger (payload=None) are
+    omitted entirely. Frontend continues polling while any entry is generating.
 
-    claimed, started_at = _claim_insights_lock(today)
-    if claimed:
-        threading.Thread(
-            target=_generate_and_persist_insights,
-            args=(today, "lazy"),
-            daemon=True,
-        ).start()
-    return jsonify(_generating_response(started_at))
+    Backwards-compat: if a card collection has no doc for today (or its
+    cached version is stale relative to CARD_VERSIONS) we kick off a
+    background regeneration just for that card."""
+    from insights import CARD_VERSIONS, CARD_IDS, CARD_DISPLAY_NAMES, CARD_LOADING_MESSAGES
+    today = _today_str()
+    entries     = []
+    generating  = []
+    newest_ts   = None
+
+    for card_id in CARD_IDS:
+        coll = CARD_COLLECTIONS[card_id]
+        doc  = coll.find_one({"_id": today})
+        if doc and doc.get("version") == CARD_VERSIONS[card_id]:
+            ts = doc.get("generated_at")
+            if ts and (newest_ts is None or ts > newest_ts):
+                newest_ts = ts
+            payload = doc.get("payload")
+            if payload and payload.get("show"):
+                entry = dict(payload)
+                entry["id"]      = card_id
+                entry["status"]  = "ready"
+                entries.append(entry)
+            # payload missing or show=False -> omit from response, frontend
+            # learns it doesn't render
+        else:
+            # Stale or missing -- spawn background generation and surface a
+            # placeholder so the frontend can render a labeled loading slot.
+            _spawn_card_generation(today, card_id, trigger="lazy")
+            entries.append({
+                "id":              card_id,
+                "status":          "generating",
+                "display_name":    CARD_DISPLAY_NAMES.get(card_id, card_id),
+                "loading_message": CARD_LOADING_MESSAGES.get(card_id, "Generating…"),
+            })
+            generating.append(card_id)
+
+    return jsonify({
+        "as_of":      newest_ts,
+        "cards":      entries,
+        "generating": generating,
+    })
 
 
 @app.route("/insights/risk-news/<symbol>", methods=["GET"])
@@ -1752,24 +1833,18 @@ def benchmark_series(symbol):
 @app.route("/insights/refresh", methods=["POST"])
 @require_auth
 def insights_refresh():
-    """Force regenerate today's insights. Returns 202 immediately."""
+    """Force regenerate today's insights for all cards. Returns 202 immediately
+    with the list of cards whose generation was spawned."""
+    from insights import CARD_IDS
     today = _today_str()
-    if _insights_lock.locked():
-        return jsonify({
-            "status": "generating",
-            "error":  "Generation already in progress",
-        }), 409
-    insights.delete_one({"_id": today})
-    _release_insights_lock(today)  # clear any stale lock too
-
-    claimed, started_at = _claim_insights_lock(today)
-    if claimed:
-        threading.Thread(
-            target=_generate_and_persist_insights,
-            args=(today, "manual"),
-            daemon=True,
-        ).start()
-    return jsonify(_generating_response(started_at)), 202
+    spawned = []
+    for card_id in CARD_IDS:
+        # Drop the cached doc and any stale lock so we can re-claim cleanly.
+        CARD_COLLECTIONS[card_id].delete_one({"_id": today})
+        _release_card_lock(today, card_id)
+        _spawn_card_generation(today, card_id, trigger="manual")
+        spawned.append(card_id)
+    return jsonify({"status": "generating", "generating": spawned}), 202
 
 
 # -- Stock Analyzer ---------------------------------------
