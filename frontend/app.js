@@ -1826,6 +1826,10 @@ function buildLoadingCard(entry) {
 }
 
 function buildCtaCard(card) {
+  // Empty-state cards have a separate render path: muted border, no CTA
+  // button, subtitle in place of prose. Same slot, different visual weight.
+  if (card.empty) return buildEmptyStateCard(card);
+
   // Benchmark card has its own actions (chart overlay toggle + dropdown),
   // so it gets a specialized builder.
   if (card.id === 'benchmark') return buildBenchmarkCard(card);
@@ -1851,6 +1855,24 @@ function buildCtaCard(card) {
     btn.textContent = card.cta_label;
     btn.addEventListener('click', () => openInsightDrawer(card));
     wrap.appendChild(btn);
+  }
+  return wrap;
+}
+
+function buildEmptyStateCard(card) {
+  const wrap = document.createElement('div');
+  wrap.className = 'cta-card cta-empty';
+
+  const headline = document.createElement('div');
+  headline.className = 'cta-card-headline';
+  headline.textContent = card.headline || 'Nothing to show';
+  wrap.appendChild(headline);
+
+  if (card.subtitle) {
+    const sub = document.createElement('div');
+    sub.className = 'cta-card-empty-subtitle';
+    sub.textContent = card.subtitle;
+    wrap.appendChild(sub);
   }
   return wrap;
 }

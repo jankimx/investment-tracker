@@ -1674,7 +1674,10 @@ def _generate_one_card_and_persist(today, card_id, trigger):
                 benchmark_fn=closures["benchmark_fn"],
             )
         elif card_id == "risk_news":
-            payload, calls = generate_risk_news_card(closures["risk_fn"])
+            payload, calls = generate_risk_news_card(
+                closures["risk_fn"],
+                has_holdings=any((p.get("value") or 0) > 0 for p in positions),
+            )
         else:
             print(f"[Insights] Unknown card_id '{card_id}' — skipping")
             return

@@ -385,6 +385,21 @@ tr:hover td { background: var(--bg2); }
 }
 .cta-card-btn:hover { color: var(--text); border-color: var(--text3); }
 
+.cta-card.cta-empty {
+  border-left-color: var(--text3);
+  background: rgba(255,255,255,0.015);
+  opacity: 0.85;
+}
+.cta-card.cta-empty .cta-card-headline {
+  color: var(--text2);
+  font-weight: 500;
+}
+.cta-card-empty-subtitle {
+  font-size: 11px;
+  color: var(--text3);
+  line-height: 1.55;
+}
+
 .cta-loading-card {
   border-left: 3px dashed var(--text3);
   opacity: 0.85;

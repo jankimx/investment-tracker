@@ -20,9 +20,9 @@ from datetime import datetime
 # Bump a value here to force just that card to regenerate on next read.
 # Used by app.py to invalidate per-card caches.
 CARD_VERSIONS = {
-    "concentration": 1,
-    "benchmark":     1,
-    "risk_news":     1,
+    "concentration": 2,   # v2: empty-state card when below threshold (no more silent hide)
+    "benchmark":     2,   # v2: empty-state card when within threshold
+    "risk_news":     2,   # v2: empty-state card when no items / claude unavailable
 }
 
 CARD_IDS = list(CARD_VERSIONS.keys())
@@ -40,6 +40,38 @@ CARD_LOADING_MESSAGES = {
     "benchmark":     "Comparing against benchmarks…",
     "risk_news":     "Reviewing news and analyzer signals…",
 }
+
+# Empty-state copy shown when a card has been generated but didn't surface
+# anything actionable. Keeps the slot visible (vs hiding silently) so the
+# user can tell the difference between "we checked and there's nothing" and
+# "the fetch failed" or "deploy added a new card we haven't built yet."
+CARD_EMPTY_STATE = {
+    "concentration": {
+        "headline": "Portfolio is well-diversified",
+        "subtitle": "No single name above 25% of total value, top 3 below 50%.",
+    },
+    "benchmark": {
+        "headline": "Tracking SPY closely",
+        "subtitle": "Portfolio return is within 2pp of the default benchmark this period.",
+    },
+    "risk_news": {
+        "headline": "No notable activity",
+        "subtitle": "No critical news or analyzer signals for your current holdings.",
+    },
+}
+
+
+def _empty_card(card_id, subtitle_override=None):
+    """Build the muted empty-state payload for a card."""
+    base = CARD_EMPTY_STATE.get(card_id, {})
+    return {
+        "id":       card_id,
+        "show":     True,
+        "empty":    True,           # frontend renders no CTA button, neutral border
+        "severity": "info",
+        "headline": base.get("headline", "Nothing to show"),
+        "subtitle": subtitle_override or base.get("subtitle", ""),
+    }
 
 
 # -- Thresholds ----------------------------------------------------
@@ -608,12 +640,16 @@ def synthesize_risk_card_verified(inputs, extract_fn, verify_fn, synthesize_fn,
 # redundant re-runs within the day.
 
 def generate_concentration_card(positions, prose_fn=None):
+    """Returns (payload, claude_calls). Always returns a payload when the
+    portfolio has any holdings — either an actionable card or a muted
+    empty-state card. Only returns (None, 0) when there's literally no
+    portfolio to evaluate."""
     stats = compute_concentration(positions)
     if not stats:
         return None, 0
     card = build_concentration_card(stats, prose=None)
     if not card:
-        return None, 0
+        return _empty_card("concentration"), 0
     claude_calls = 0
     if prose_fn is not None:
         try:
@@ -624,7 +660,11 @@ def generate_concentration_card(positions, prose_fn=None):
     return card, claude_calls
 
 
-def generate_benchmark_card(prose_fn=None, benchmark_fn=None):
+def generate_benchmark_card(prose_fn=None, benchmark_fn=None, has_portfolio=True):
+    """Always returns a payload when there's a portfolio with benchmark
+    coverage. Falls back to empty-state when within threshold of the
+    benchmark. Returns (None, 0) only when we can't even compute a
+    comparison (no portfolio history or all benchmark fetches failed)."""
     if benchmark_fn is None:
         return None, 0
     try:
@@ -634,10 +674,22 @@ def generate_benchmark_card(prose_fn=None, benchmark_fn=None):
         return None, 0
     stats = compute_benchmark_comparison(portfolio_totals, benchmark_closes)
     if not stats:
+        # no portfolio history vs benchmark — leave card off entirely
         return None, 0
     card = build_benchmark_card(stats, prose=None)
     if not card:
-        return None, 0
+        # within threshold of benchmark — show muted empty state with the
+        # actual delta in the subtitle so the user knows by how much.
+        default = stats.get("default_benchmark", "SPY")
+        default_cmp = next(
+            (c for c in stats["comparisons"] if c["benchmark"] == default),
+            stats["comparisons"][0],
+        )
+        delta = default_cmp["delta_pp"]
+        direction = "ahead of" if delta > 0 else "behind"
+        subtitle = (f"Portfolio is {abs(delta):.1f}pp {direction} {default} "
+                    f"this period — within the {BENCHMARK_DELTA_THRESHOLD_PP}pp threshold.")
+        return _empty_card("benchmark", subtitle_override=subtitle), 0
     claude_calls = 0
     if prose_fn is not None:
         try:
@@ -648,20 +700,32 @@ def generate_benchmark_card(prose_fn=None, benchmark_fn=None):
     return card, claude_calls
 
 
-def generate_risk_news_card(risk_fn=None):
-    """risk_fn is expected to bundle collect_risk_inputs +
-    synthesize_risk_card_verified into a no-arg closure. Returns None when
-    there's nothing to summarize."""
-    if risk_fn is None:
+def generate_risk_news_card(risk_fn=None, has_holdings=True):
+    """Always returns a payload when the user has holdings — either an
+    actionable card with items or a muted empty-state card. Only returns
+    (None, 0) when there are no holdings at all."""
+    if not has_holdings:
         return None, 0
+    if risk_fn is None:
+        # Claude not configured; still show empty state so the user knows
+        # we tried (and what's missing).
+        return _empty_card(
+            "risk_news",
+            subtitle_override="AI synthesis is not configured (ANTHROPIC_API_KEY missing).",
+        ), 0
     try:
         verified = risk_fn()
     except Exception as e:
         print(f"[Insights] risk pipeline failed: {type(e).__name__}: {e}")
-        return None, 0
-    if not verified:
-        return None, 0
+        return _empty_card(
+            "risk_news",
+            subtitle_override="Could not fetch news or analyzer signals right now.",
+        ), 0
+    if not verified or not verified.get("items"):
+        return _empty_card("risk_news"), (verified or {}).get("claude_calls", 0)
     card = build_risk_card(verified, prose=verified.get("prose"))
+    if not card:
+        return _empty_card("risk_news"), verified.get("claude_calls", 0)
     return card, verified.get("claude_calls", 0)
 
 
