@@ -1738,6 +1738,26 @@ let _insightsPollTimer  = null;
 let _insightsBackoffMs  = INSIGHTS_BACKOFF_START_MS;
 let _lastGeneratingSet  = new Set();
 
+async function regenerateInsights() {
+  const btn = document.getElementById('btn-regen-insights');
+  if (!btn || btn.disabled) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '↻ Regenerating…';
+  try {
+    await api('/insights/refresh', { method: 'POST' });
+    // Restart the polling loop so we pick up the cards as they finish.
+    _insightsBackoffMs = INSIGHTS_BACKOFF_START_MS;
+    await loadInsights();
+    showToast('Regenerating insights…', 2500);
+  } catch (e) {
+    showToast('Could not regenerate: ' + (e.message || e), 4000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
 async function loadInsights() {
   try {
     const data = await api('/insights/dashboard');
@@ -1931,7 +1951,7 @@ function buildBenchmarkCard(card) {
     const deltaRow = document.createElement('div');
     deltaRow.className = 'benchmark-row benchmark-delta';
     const deltaCls = c.delta_pp >= 0 ? 'positive' : 'negative';
-    deltaRow.appendChild(_kv('Delta', _signPct(c.delta_pp) + 'pp', deltaCls));
+    deltaRow.appendChild(_kv('Delta', _signPct(c.delta_pp), deltaCls));
     cmpEl.appendChild(portfolioRow);
     cmpEl.appendChild(benchRow);
     cmpEl.appendChild(deltaRow);

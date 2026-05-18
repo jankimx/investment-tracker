@@ -21,7 +21,7 @@ from datetime import datetime
 # Used by app.py to invalidate per-card caches.
 CARD_VERSIONS = {
     "concentration": 2,   # v2: empty-state card when below threshold (no more silent hide)
-    "benchmark":     2,   # v2: empty-state card when within threshold
+    "benchmark":     3,   # v3: headline format "pp" -> "%" (user-friendly)
     "risk_news":     3,   # v3: FMP news endpoint migrated v3/stock_news -> stable/news/stock
 }
 
@@ -310,7 +310,7 @@ def build_benchmark_card(stats, prose=None):
     severity = "critical" if abs_delta >= BENCHMARK_CRITICAL_DELTA_PP else "warn" if delta < 0 else "info"
 
     direction = "Trailing" if delta < 0 else "Beating"
-    headline  = f"{direction} {default_cmp['benchmark']} by {abs_delta:.1f}pp YTD"
+    headline  = f"{direction} {default_cmp['benchmark']} by {abs_delta:.1f}% YTD"
 
     return {
         "id":        "benchmark",
@@ -687,8 +687,8 @@ def generate_benchmark_card(prose_fn=None, benchmark_fn=None, has_portfolio=True
         )
         delta = default_cmp["delta_pp"]
         direction = "ahead of" if delta > 0 else "behind"
-        subtitle = (f"Portfolio is {abs(delta):.1f}pp {direction} {default} "
-                    f"this period — within the {BENCHMARK_DELTA_THRESHOLD_PP}pp threshold.")
+        subtitle = (f"Portfolio is {abs(delta):.1f}% {direction} {default} "
+                    f"this period — within the {BENCHMARK_DELTA_THRESHOLD_PP}% threshold.")
         return _empty_card("benchmark", subtitle_override=subtitle), 0
     claude_calls = 0
     if prose_fn is not None:

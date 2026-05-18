@@ -347,11 +347,34 @@ tr:hover td { background: var(--bg2); }
 .analyze-section-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 
 /* -- Insights CTA row ----------------------------------- */
+.cta-row-header {
+  display: flex;
+  justify-content: flex-end;
+  margin: 20px 0 6px;
+}
+.btn-regen-insights {
+  font-size: 11px;
+  color: var(--text3);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.btn-regen-insights:hover:not(:disabled) {
+  color: var(--text2);
+  background: var(--bg2);
+}
+.btn-regen-insights:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .cta-row {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
-  margin: 20px 0 24px;
+  margin: 0 0 24px;
 }
 .cta-row[hidden] { display: none; }
 

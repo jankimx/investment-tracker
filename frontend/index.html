@@ -50,8 +50,15 @@
 
     <!-- Dashboard -->
     <div id="tab-dashboard" class="section active">
-      <!-- Insights CTA row — populated by loadInsights(). Hidden when no
-           cards apply or before the first fetch resolves. -->
+      <!-- Insights CTA row — populated by loadInsights(). The header above
+           the row carries the manual regenerate button; the row itself
+           hides when no cards apply or before the first fetch resolves. -->
+      <div class="cta-row-header">
+        <button id="btn-regen-insights" class="btn-regen-insights"
+                onclick="regenerateInsights()" title="Regenerate all cards now">
+          &#x21bb; Regenerate insights
+        </button>
+      </div>
       <div id="cta-row" class="cta-row" hidden></div>
 
       <div class="metrics">
