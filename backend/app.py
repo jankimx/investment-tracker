@@ -251,9 +251,23 @@ def migrate_share_balances_to_transactions():
         print(f"[Migration] Converted {converted} share-tracked balances to transactions")
     return converted
 
+def drop_deprecated_insights_collection():
+    """One-time cleanup of the legacy single-doc `insights` collection. The
+    feature now uses one collection per card type (insights_concentration
+    etc.); old data is dead weight. Idempotent — no-op once the collection
+    is gone."""
+    try:
+        if "insights" in db.list_collection_names():
+            db.drop_collection("insights")
+            print("[Cleanup] Dropped deprecated `insights` collection")
+    except Exception as e:
+        print(f"[Cleanup] Could not drop deprecated `insights` collection: {e}")
+
+
 try:
     migrate_share_balances_to_transactions()
     cleanup_superseded_balances()
+    drop_deprecated_insights_collection()
 except Exception as e:
     print(f"[Cleanup] Failed (non-fatal): {e}")
 
