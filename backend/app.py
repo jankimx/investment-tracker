@@ -1792,32 +1792,30 @@ def insights_dashboard():
     })
 
 
-@app.route("/maintenance/backfill", methods=["POST"])
-@require_auth
-def maintenance_backfill():
-    """One-shot backfill: for every held position, move its earliest BUY
-    transaction back to `since` (preserving original date in `backfilled_from`),
-    and pull historical EOD prices back to `since` for every held symbol +
-    the benchmark tickers (SPY/QQQ/VTI).
+_backfill_lock = threading.Lock()
 
-    Body: { "since": "YYYY-MM-DD" }   (also accepts ?since= query param)
 
-    Idempotent: transactions already dated at or before `since` are skipped,
-    and `backfill_prices_from_fmp` uses $setOnInsert so existing price rows
-    are not overwritten.
-    """
+def _do_backfill(since):
+    """Background worker for /maintenance/backfill. Writes progress + final
+    results to meta._id="last_backfill" so /maintenance/backfill/status can
+    surface them. Parallelizes FMP calls across symbols (each call pulls a
+    year of EOD bars, so serial would easily blow past gunicorn's timeout)."""
+    if not _backfill_lock.acquire(blocking=False):
+        print("[Backfill] Already running, skipping")
+        return
+
+    started_at = datetime.utcnow()
+    record = {
+        "_id":          "last_backfill",
+        "since":        since,
+        "started_at":   started_at.isoformat(),
+        "finished_at":  None,
+        "in_progress":  True,
+    }
+    meta.update_one({"_id": "last_backfill"}, {"$set": record}, upsert=True)
+
     try:
-        payload = request.get_json(silent=True) or {}
-        since   = request.args.get("since") or payload.get("since")
-        if not since:
-            return jsonify({"error": "missing 'since' (YYYY-MM-DD)"}), 400
-        try:
-            datetime.strptime(since, "%Y-%m-%d")
-        except ValueError:
-            return jsonify({"error": "'since' must be YYYY-MM-DD"}), 400
-
-        # 1. Walk every distinct (platform, stock) with transactions; for each,
-        #    move the earliest BUY transaction's date back to `since` if needed.
+        # 1) Move earliest BUY per (platform, stock) back to `since` if later.
         keys = set()
         for r in txns.aggregate([
             {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
@@ -1855,40 +1853,102 @@ def maintenance_backfill():
                 }},
             )
             txn_updated.append({
-                "platform":  platform,
-                "stock":     stock,
-                "from_date": current,
-                "to_date":   since,
+                "platform":  platform, "stock": stock,
+                "from_date": current, "to_date": since,
                 "txn_id":    str(earliest["_id"]),
             })
 
-        # 2. Backfill historical prices for every held symbol + benchmarks.
+        # 2) Backfill historical prices — in parallel so 10+ symbols don't
+        #    serialize into a 30+ second wall-clock.
         symbols = sorted(
             {stock for (_, stock) in keys if stock and stock != "TOTAL"}
             | set(BENCHMARK_SYMBOLS)
         )
         price_results = {}
-        for sym in symbols:
-            try:
-                inserted = backfill_prices_from_fmp(sym, since)
-                price_results[sym] = {"inserted": inserted}
-            except Exception as e:
-                price_results[sym] = {"error": f"{type(e).__name__}: {e}"}
+        if symbols:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = {executor.submit(backfill_prices_from_fmp, sym, since): sym
+                           for sym in symbols}
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    try:
+                        inserted = fut.result()
+                        price_results[sym] = {"inserted": inserted}
+                    except Exception as e:
+                        price_results[sym] = {"error": f"{type(e).__name__}: {e}"}
 
-        return jsonify({
-            "since":                since,
-            "transactions_updated": txn_updated,
-            "transactions_skipped": txn_skipped,
-            "prices_backfilled":    price_results,
-        })
+        meta.update_one(
+            {"_id": "last_backfill"},
+            {"$set": {
+                "in_progress":          False,
+                "finished_at":          datetime.utcnow().isoformat(),
+                "transactions_updated": txn_updated,
+                "transactions_skipped": txn_skipped,
+                "prices_backfilled":    price_results,
+                "symbols_count":        len(symbols),
+            }},
+        )
+        print(
+            f"[Backfill] done since={since}: {len(txn_updated)} txns moved, "
+            f"{sum(v.get('inserted', 0) for v in price_results.values() if isinstance(v.get('inserted', 0), int))} "
+            f"price rows inserted across {len(symbols)} symbols"
+        )
     except Exception as e:
-        # Surface the real exception in the response body so we can debug
-        # without Railway log access (otherwise we just see 500 + CORS error).
         import traceback
-        return jsonify({
-            "error": f"{type(e).__name__}: {e}",
-            "trace": traceback.format_exc().splitlines()[-6:],
-        }), 500
+        print(f"[Backfill] failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        meta.update_one(
+            {"_id": "last_backfill"},
+            {"$set": {
+                "in_progress": False,
+                "finished_at": datetime.utcnow().isoformat(),
+                "error":       f"{type(e).__name__}: {e}",
+                "trace":       traceback.format_exc().splitlines()[-8:],
+            }},
+        )
+    finally:
+        _backfill_lock.release()
+
+
+@app.route("/maintenance/backfill", methods=["POST"])
+@require_auth
+def maintenance_backfill():
+    """One-shot backfill: moves each holding's earliest BUY transaction back
+    to `since` (preserving the original date in `backfilled_from`) and pulls
+    historical EOD prices back to `since` for every held symbol + benchmarks.
+
+    Returns 202 immediately; actual work runs in a background thread because
+    parallel FMP calls across 10+ symbols can blow past gunicorn's 30s
+    timeout. Poll GET /maintenance/backfill/status for results.
+
+    Body: { "since": "YYYY-MM-DD" }  (also accepts ?since= query param)
+    """
+    payload = request.get_json(silent=True) or {}
+    since   = request.args.get("since") or payload.get("since")
+    if not since:
+        return jsonify({"error": "missing 'since' (YYYY-MM-DD)"}), 400
+    try:
+        datetime.strptime(since, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": "'since' must be YYYY-MM-DD"}), 400
+
+    if _backfill_lock.locked():
+        return jsonify({"started": False, "error": "Backfill already in progress"}), 409
+
+    threading.Thread(target=_do_backfill, args=(since,), daemon=True).start()
+    return jsonify({"started": True, "since": since}), 202
+
+
+@app.route("/maintenance/backfill/status", methods=["GET"])
+@require_auth
+def maintenance_backfill_status():
+    """Returns the result of the most recent /maintenance/backfill run, plus
+    whether one is currently in flight."""
+    last = meta.find_one({"_id": "last_backfill"}) or {}
+    last.pop("_id", None)
+    return jsonify({
+        "in_progress": _backfill_lock.locked(),
+        "last":        last,
+    })
 
 
 @app.route("/insights/debug/news/<symbol>", methods=["GET"])
