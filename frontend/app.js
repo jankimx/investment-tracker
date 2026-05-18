@@ -9,7 +9,8 @@ let state = {
   entries: [], positions: [], chartRows: [],
   platforms: [], stocks: [],
   summary: null, holdings: [], transactions: [],
-  posGrouping: 'none', posSortCol: 'value', posSortDir: 1
+  posGrouping: 'none', posSortCol: 'value', posSortDir: 1,
+  benchmarkOverlay: { symbol: null, series: null }  // chart overlay state
 };
 
 let growthChart = null;
@@ -487,11 +488,26 @@ function renderChart(data, view) {
   let datasets = [];
 
   if (view === 'total') {
+    const portfolioSeries = buildSeries(data, allDates);
     datasets = [{
       label: 'Total value', tension: 0, pointRadius: 3, borderWidth: 1.5,
-      data: buildSeries(data, allDates),
+      data: portfolioSeries,
       borderColor: '#4a90e2', backgroundColor: 'rgba(74,144,226,0.06)', fill: true
     }];
+    // Benchmark overlay — only shows in 'total' view (the per-platform/per-stock
+    // views are about composition, not a single line to compare against).
+    const overlay = state.benchmarkOverlay;
+    if (overlay && overlay.symbol && overlay.series && portfolioSeries.length) {
+      const benchData = buildBenchmarkOverlaySeries(overlay.series, allDates, portfolioSeries[0]);
+      if (benchData) {
+        datasets.push({
+          label: overlay.symbol + ' equivalent', tension: 0, pointRadius: 0,
+          borderWidth: 1.5, borderDash: [4, 4],
+          data: benchData,
+          borderColor: '#ffb347', backgroundColor: 'rgba(255,179,71,0.04)', fill: false
+        });
+      }
+    }
   } else {
     const keyFn = view === 'platform' ? e => e.platform : e => e.stock;
     const groups = new Map();
@@ -1773,6 +1789,10 @@ function renderCtaRow(cards) {
 }
 
 function buildCtaCard(card) {
+  // Benchmark card has its own actions (chart overlay toggle + dropdown),
+  // so it gets a specialized builder.
+  if (card.id === 'benchmark') return buildBenchmarkCard(card);
+
   const wrap = document.createElement('div');
   wrap.className = 'cta-card cta-' + (card.severity || 'info');
 
@@ -1796,6 +1816,121 @@ function buildCtaCard(card) {
     wrap.appendChild(btn);
   }
   return wrap;
+}
+
+function buildBenchmarkCard(card) {
+  const detail   = card.detail || {};
+  const choices  = detail.available_benchmarks || ['SPY', 'QQQ', 'VTI'];
+  const def      = detail.default_benchmark || choices[0];
+  const cmpFor   = sym => (detail.comparisons || []).find(c => c.benchmark === sym);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'cta-card cta-' + (card.severity || 'info');
+
+  const headline = document.createElement('div');
+  headline.className = 'cta-card-headline';
+  headline.textContent = card.headline || '';
+  wrap.appendChild(headline);
+
+  if (card.prose) {
+    const prose = document.createElement('div');
+    prose.className = 'cta-card-prose';
+    prose.textContent = card.prose;
+    wrap.appendChild(prose);
+  }
+
+  // Per-benchmark mini-table so the dropdown change updates a visible number.
+  const cmpEl = document.createElement('div');
+  cmpEl.className = 'benchmark-compare';
+  function refreshCompare(sym) {
+    const c = cmpFor(sym);
+    cmpEl.replaceChildren();
+    if (!c) {
+      cmpEl.textContent = 'No data for ' + sym;
+      return;
+    }
+    const portfolioRow = document.createElement('div');
+    portfolioRow.className = 'benchmark-row';
+    portfolioRow.appendChild(_kv('Portfolio', _signPct(c.portfolio_pct)));
+    const benchRow = document.createElement('div');
+    benchRow.className = 'benchmark-row';
+    benchRow.appendChild(_kv(sym, _signPct(c.benchmark_pct)));
+    const deltaRow = document.createElement('div');
+    deltaRow.className = 'benchmark-row benchmark-delta';
+    const deltaCls = c.delta_pp >= 0 ? 'positive' : 'negative';
+    deltaRow.appendChild(_kv('Delta', _signPct(c.delta_pp) + 'pp', deltaCls));
+    cmpEl.appendChild(portfolioRow);
+    cmpEl.appendChild(benchRow);
+    cmpEl.appendChild(deltaRow);
+  }
+
+  // Controls: dropdown + toggle button.
+  const controls = document.createElement('div');
+  controls.className = 'benchmark-controls';
+
+  const select = document.createElement('select');
+  select.className = 'benchmark-select';
+  choices.forEach(sym => {
+    const opt = document.createElement('option');
+    opt.value = sym;
+    opt.textContent = sym;
+    if (sym === (state.benchmarkOverlay?.symbol || def)) opt.selected = true;
+    select.appendChild(opt);
+  });
+  select.addEventListener('change', () => {
+    refreshCompare(select.value);
+    // If overlay is currently active, swap to the new benchmark.
+    if (state.benchmarkOverlay?.symbol) {
+      loadBenchmarkOverlay(select.value);
+    }
+  });
+
+  const btn = document.createElement('button');
+  btn.className = 'cta-card-btn';
+  function refreshBtn() {
+    btn.textContent = state.benchmarkOverlay?.symbol === select.value
+      ? 'Hide overlay'
+      : (card.cta_label || 'Compare on chart');
+  }
+  refreshBtn();
+  btn.addEventListener('click', async () => {
+    if (state.benchmarkOverlay?.symbol === select.value) {
+      clearBenchmarkOverlay();
+    } else {
+      await loadBenchmarkOverlay(select.value);
+    }
+    refreshBtn();
+  });
+
+  controls.appendChild(select);
+  controls.appendChild(btn);
+
+  refreshCompare(select.value);
+  wrap.appendChild(cmpEl);
+  wrap.appendChild(controls);
+
+  // Stash for renderChart to redraw the legend label correctly.
+  wrap._refreshBtn = refreshBtn;
+  return wrap;
+}
+
+function _kv(label, value, valueCls) {
+  const wrap = document.createElement('span');
+  const l = document.createElement('span');
+  l.className = 'benchmark-label';
+  l.textContent = label;
+  const v = document.createElement('span');
+  v.className = 'benchmark-value' + (valueCls ? ' ' + valueCls : '');
+  v.textContent = value;
+  wrap.appendChild(l);
+  wrap.appendChild(v);
+  return wrap;
+}
+
+function _signPct(n) {
+  if (n == null) return '--';
+  const sign = n >= 0 ? '+' : '';
+  return sign + n.toFixed(2) + '%';
 }
 
 function renderCtaLoading() {
@@ -1946,6 +2081,53 @@ function _drawerSection(titleText, childNodes) {
   section.appendChild(title);
   childNodes.forEach(n => section.appendChild(n));
   return section;
+}
+
+// -- Benchmark overlay -------------------------------------
+async function loadBenchmarkOverlay(symbol) {
+  try {
+    const data = await api('/benchmark/' + encodeURIComponent(symbol));
+    state.benchmarkOverlay = { symbol, series: data };
+    renderDashboard();  // rebuilds chart with overlay
+  } catch (e) {
+    console.error('Failed to load benchmark overlay:', e);
+    showToast('Could not load ' + symbol + ' data', 3000);
+  }
+}
+
+function clearBenchmarkOverlay() {
+  state.benchmarkOverlay = { symbol: null, series: null };
+  renderDashboard();
+}
+
+// Given the API response and the chart's date labels, build a per-label
+// array of dollar-equivalent values (forward-fills weekends/holidays).
+// Returns null if there's no usable data.
+function buildBenchmarkOverlaySeries(seriesPayload, allDates, startValue) {
+  const series = (seriesPayload && seriesPayload.series) || [];
+  if (!series.length || !startValue || startValue <= 0) return null;
+
+  // Find first benchmark close ≤ first chart date (or earliest available).
+  const firstDate = allDates[0];
+  let baseClose = null;
+  for (const p of series) {
+    if (p.date <= firstDate) baseClose = p.close;
+    else break;
+  }
+  if (baseClose == null) baseClose = series[0].close;
+  if (!baseClose || baseClose <= 0) return null;
+
+  // Walk through chart dates, advancing the benchmark cursor to the latest
+  // close at or before each chart date. Forward-fill across gaps.
+  let cursor = 0;
+  let lastClose = baseClose;
+  return allDates.map(d => {
+    while (cursor < series.length && series[cursor].date <= d) {
+      lastClose = series[cursor].close;
+      cursor++;
+    }
+    return Math.round(startValue * (lastClose / baseClose));
+  });
 }
 
 function buildWeightRow(label, pct, value) {

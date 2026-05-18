@@ -23,6 +23,11 @@ CONCENTRATION_TOP_3_THRESHOLD  = 50.0  # %
 CONCENTRATION_CRITICAL_TOP_1   = 40.0  # %
 CONCENTRATION_CRITICAL_TOP_3   = 70.0  # %
 
+BENCHMARK_DELTA_THRESHOLD_PP   = 2.0   # show the card when |portfolio - benchmark| >= 2pp
+BENCHMARK_CRITICAL_DELTA_PP    = 5.0   # critical severity at >= 5pp
+DEFAULT_BENCHMARK              = "SPY"
+AVAILABLE_BENCHMARKS           = ["SPY", "QQQ", "VTI"]
+
 
 # -- Concentration card -------------------------------------------
 def compute_concentration(positions):
@@ -138,17 +143,134 @@ def build_concentration_card(stats, prose=None):
     }
 
 
+# -- Benchmark card -----------------------------------------------
+def compute_benchmark_comparison(portfolio_totals_by_date, benchmark_closes_by_symbol):
+    """Compute portfolio-vs-benchmark return over the longest window the
+    portfolio data supports.
+
+    Args:
+        portfolio_totals_by_date: {YYYY-MM-DD: total_portfolio_value}.
+                                  Caller produces this (e.g., from
+                                  derive_chart_series rolled up across positions).
+        benchmark_closes_by_symbol: {symbol: {YYYY-MM-DD: close_price}}.
+                                    Keys are benchmark tickers (SPY/QQQ/VTI).
+
+    Returns the comparison stats dict, or None if there isn't enough data
+    to compute even one benchmark.
+    """
+    dates = sorted(d for d, v in portfolio_totals_by_date.items() if v and v > 0)
+    if len(dates) < 2:
+        return None
+
+    actual_start = dates[0]
+    actual_end   = dates[-1]
+    p_start      = portfolio_totals_by_date[actual_start]
+    p_end        = portfolio_totals_by_date[actual_end]
+    if p_start <= 0:
+        return None
+    portfolio_pct = (p_end / p_start - 1) * 100
+
+    comparisons = []
+    for symbol in AVAILABLE_BENCHMARKS:
+        closes = benchmark_closes_by_symbol.get(symbol, {})
+        if not closes:
+            continue
+        # For the start: take the earliest benchmark date >= portfolio's start
+        # (handles holidays/weekends and backfill gaps). For the end: take
+        # the latest benchmark date <= portfolio's end. Both must exist.
+        bench_dates = sorted(closes.keys())
+        starts = [d for d in bench_dates if d >= actual_start]
+        ends   = [d for d in bench_dates if d <= actual_end]
+        if not starts or not ends:
+            continue
+        bench_start = closes[starts[0]]
+        bench_end   = closes[ends[-1]]
+        if bench_start <= 0:
+            continue
+        benchmark_pct = (bench_end / bench_start - 1) * 100
+        comparisons.append({
+            "benchmark":      symbol,
+            "portfolio_pct":  round(portfolio_pct, 2),
+            "benchmark_pct":  round(benchmark_pct, 2),
+            "delta_pp":       round(portfolio_pct - benchmark_pct, 2),
+        })
+
+    if not comparisons:
+        return None
+
+    return {
+        "period": {
+            "from":  actual_start,
+            "to":    actual_end,
+            "label": "YTD",
+        },
+        "portfolio_start_value": round(p_start, 2),
+        "portfolio_end_value":   round(p_end, 2),
+        "default_benchmark":     DEFAULT_BENCHMARK,
+        "available_benchmarks":  AVAILABLE_BENCHMARKS,
+        "comparisons":           comparisons,
+    }
+
+
+def build_benchmark_card(stats, prose=None):
+    """Turn benchmark stats into the card payload. Returns None when no
+    benchmark crosses the delta threshold."""
+    if not stats or not stats.get("comparisons"):
+        return None
+
+    default = stats["default_benchmark"]
+    default_cmp = next(
+        (c for c in stats["comparisons"] if c["benchmark"] == default),
+        stats["comparisons"][0],
+    )
+    delta = default_cmp["delta_pp"]
+    abs_delta = abs(delta)
+
+    if abs_delta < BENCHMARK_DELTA_THRESHOLD_PP:
+        return None
+
+    severity = "critical" if abs_delta >= BENCHMARK_CRITICAL_DELTA_PP else "warn" if delta < 0 else "info"
+
+    direction = "Trailing" if delta < 0 else "Beating"
+    headline  = f"{direction} {default_cmp['benchmark']} by {abs_delta:.1f}pp YTD"
+
+    return {
+        "id":        "benchmark",
+        "show":      True,
+        "severity":  severity,
+        "headline":  headline,
+        "cta_label": "Compare on chart",
+        "prose":     prose,
+        "detail": {
+            "period":               stats["period"],
+            "default_benchmark":    stats["default_benchmark"],
+            "available_benchmarks": stats["available_benchmarks"],
+            "portfolio_start_value": stats["portfolio_start_value"],
+            "portfolio_end_value":   stats["portfolio_end_value"],
+            "comparisons":          stats["comparisons"],
+            "trigger": {
+                "rule":      "abs_delta_pp_gte",
+                "threshold": BENCHMARK_DELTA_THRESHOLD_PP,
+                "actual":    abs_delta,
+            },
+        },
+    }
+
+
 # -- Orchestrator -------------------------------------------------
-def generate_insights(positions, prose_fn=None, trigger="lazy"):
+def generate_insights(positions, prose_fn=None, benchmark_fn=None, trigger="lazy"):
     """Assemble today's insights document.
 
     Args:
-        positions: list of derived positions (from derive_all_positions()).
-        prose_fn:  optional callable(card_id: str, stats: dict) -> str.
-                   Generates Claude-written prose per card. May raise; on
-                   exception we log and ship the card with prose=None.
-        trigger:   "lazy" or "cron". Recorded for telemetry; does not
-                   change behavior.
+        positions:     list of derived positions (from derive_all_positions()).
+        prose_fn:      optional callable(card_id, stats) -> str.
+                       Generates Claude-written prose per card. May raise;
+                       on exception we log and ship the card with prose=None.
+        benchmark_fn:  optional callable() -> (portfolio_totals_by_date,
+                       benchmark_closes_by_symbol). Caller provides this
+                       (it needs DB / FMP access). May raise; on exception
+                       the benchmark card is skipped.
+        trigger:       "lazy", "cron", or "manual" — recorded for telemetry.
 
     Returns the document body to be stored in the `insights` collection
     (caller wraps with _id = today).
@@ -157,20 +279,35 @@ def generate_insights(positions, prose_fn=None, trigger="lazy"):
     claude_calls = 0
     cards        = []
 
-    concentration_stats = compute_concentration(positions)
-    if concentration_stats:
-        prose = None
+    def _attach(card_id, stats, builder):
+        """Build the card without prose first (cheap threshold check). Only
+        if it would render do we burn a Claude call for the prose."""
+        nonlocal claude_calls
+        card = builder(stats, prose=None)
+        if not card:
+            return
         if prose_fn is not None:
             try:
-                prose = prose_fn("concentration", concentration_stats)
+                card["prose"] = prose_fn(card_id, stats)
                 claude_calls += 1
             except Exception as e:
-                print(f"[Insights] Concentration prose failed: {type(e).__name__}: {e}")
-        card = build_concentration_card(concentration_stats, prose=prose)
-        if card:
-            cards.append(card)
+                print(f"[Insights] {card_id} prose failed: {type(e).__name__}: {e}")
+        cards.append(card)
 
-    # Phase 2: benchmark card
+    concentration_stats = compute_concentration(positions)
+    if concentration_stats:
+        _attach("concentration", concentration_stats, build_concentration_card)
+
+    if benchmark_fn is not None:
+        try:
+            portfolio_totals, benchmark_closes = benchmark_fn()
+            benchmark_stats = compute_benchmark_comparison(portfolio_totals, benchmark_closes)
+        except Exception as e:
+            print(f"[Insights] Benchmark data fetch failed: {type(e).__name__}: {e}")
+            benchmark_stats = None
+        if benchmark_stats:
+            _attach("benchmark", benchmark_stats, build_benchmark_card)
+
     # Phase 3: risk/news card
 
     finished = datetime.utcnow()

@@ -28,6 +28,10 @@ APP_URL          = os.getenv("APP_URL", "https://investment-tracker-inky.vercel.
 FMP_KEY          = os.getenv("FMP_API_KEY", "")
 CLAUDE_KEY       = os.getenv("ANTHROPIC_API_KEY", "")
 
+# Benchmark tickers the dashboard insights compare against. Pulled by the
+# regular price refresh so they're cached in `prices` alongside holdings.
+BENCHMARK_SYMBOLS = ["SPY", "QQQ", "VTI"]
+
 if not APP_PASSWORD:
     raise RuntimeError("APP_PASSWORD env var must be set -- refusing to start with no password.")
 
@@ -367,10 +371,13 @@ def do_refresh(notify=False):
     positions = derive_all_positions()
     # Skip value-only balance entries (e.g. 401k aggregate rows where stock=="TOTAL"
     # or any balance with no shares). They have no real ticker to fetch.
-    symbols   = sorted({
+    held_symbols = {
         p["stock"].upper() for p in positions
         if p.get("shares") is not None and p["stock"].upper() != "TOTAL"
-    })
+    }
+    # Always include benchmark tickers so the insights card can compare even
+    # if the user holds none of them directly.
+    symbols = sorted(held_symbols | set(BENCHMARK_SYMBOLS))
     if not symbols:
         meta.update_one(
             {"key": "last_refresh"},
@@ -1451,6 +1458,50 @@ def _release_insights_lock(today):
     meta.delete_one({"_id": f"insights_lock_{today}"})
 
 
+def _ytd_start_date():
+    """First calendar day of the current year as YYYY-MM-DD (UTC)."""
+    return datetime.utcnow().strftime("%Y") + "-01-01"
+
+
+def _load_benchmark_data_for_insights():
+    """Build the inputs that insights.compute_benchmark_comparison() expects.
+
+    Returns (portfolio_totals_by_date, benchmark_closes_by_symbol). May raise
+    on price-fetch failures -- caller (generate_insights) catches and skips
+    the benchmark card."""
+    ytd_start = _ytd_start_date()
+
+    # Make sure each benchmark has historical bars back to YTD. ensure_price_
+    # history_covers is idempotent and a no-op if we already have coverage.
+    for sym in BENCHMARK_SYMBOLS:
+        try:
+            ensure_price_history_covers(sym, ytd_start)
+        except Exception as ex:
+            print(f"[Insights/benchmark] backfill failed for {sym}: {ex}")
+
+    # Portfolio total per date over the YTD window.
+    chart_rows = derive_chart_series(ytd_start)
+    portfolio_totals = {}
+    for r in chart_rows:
+        d = r["date"]
+        portfolio_totals[d] = portfolio_totals.get(d, 0.0) + float(r.get("value") or 0)
+
+    # Load benchmark closes (date -> close) for each available benchmark.
+    benchmark_closes = {}
+    for sym in BENCHMARK_SYMBOLS:
+        closes = {}
+        for p in prices.find(
+            {"symbol": sym, "date": {"$gte": ytd_start}},
+            {"_id": 0, "date": 1, "close": 1},
+        ):
+            if p.get("close") is not None:
+                closes[p["date"]] = float(p["close"])
+        if closes:
+            benchmark_closes[sym] = closes
+
+    return portfolio_totals, benchmark_closes
+
+
 def _generate_and_persist_insights(today, trigger):
     """Compute today's insights and upsert into the `insights` collection.
     Holds the in-process lock so a single worker can't spawn two generations.
@@ -1462,17 +1513,20 @@ def _generate_and_persist_insights(today, trigger):
         return
     try:
         from insights import generate_insights
-        from claude_synthesis import summarize_concentration
+        from claude_synthesis import summarize_concentration, summarize_benchmark
 
         def prose_fn(card_id, stats):
             if card_id == "concentration":
                 return summarize_concentration(stats)
+            if card_id == "benchmark":
+                return summarize_benchmark(stats)
             return None
 
         positions = derive_all_positions()
         doc = generate_insights(
             positions,
             prose_fn=(prose_fn if CLAUDE_KEY else None),
+            benchmark_fn=_load_benchmark_data_for_insights,
             trigger=trigger,
         )
         insights.replace_one({"_id": today}, {"_id": today, **doc}, upsert=True)
@@ -1541,6 +1595,44 @@ def insights_dashboard():
             daemon=True,
         ).start()
     return jsonify(_generating_response(started_at))
+
+
+@app.route("/benchmark/<symbol>", methods=["GET"])
+@require_auth
+def benchmark_series(symbol):
+    """Historical close prices for a benchmark ticker, used by the dashboard
+    to overlay on the growth chart. Default window matches /chart-data
+    (90 days back from today)."""
+    symbol = symbol.upper().strip()
+    if symbol not in BENCHMARK_SYMBOLS:
+        return jsonify({
+            "error": f"Unsupported benchmark; choose one of {BENCHMARK_SYMBOLS}",
+        }), 400
+
+    from_date = request.args.get("from") or (
+        datetime.utcnow() - timedelta(days=CHART_DEFAULT_DAYS)
+    ).strftime("%Y-%m-%d")
+    to_date = request.args.get("to") or datetime.utcnow().strftime("%Y-%m-%d")
+
+    try:
+        ensure_price_history_covers(symbol, from_date)
+    except Exception as ex:
+        print(f"[Benchmark] backfill failed for {symbol}: {ex}")
+
+    rows = []
+    for p in prices.find(
+        {"symbol": symbol, "date": {"$gte": from_date, "$lte": to_date}},
+        {"_id": 0, "date": 1, "close": 1},
+    ).sort("date", ASCENDING):
+        if p.get("close") is not None:
+            rows.append({"date": p["date"], "close": float(p["close"])})
+
+    return jsonify({
+        "symbol": symbol,
+        "from":   from_date,
+        "to":     to_date,
+        "series": rows,
+    })
 
 
 @app.route("/insights/refresh", methods=["POST"])

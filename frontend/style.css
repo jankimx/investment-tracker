@@ -395,6 +395,47 @@ tr:hover td { background: var(--bg2); }
   text-align: center;
 }
 
+/* Benchmark card has its own mini-table + dropdown */
+.benchmark-compare {
+  display: flex; flex-direction: column;
+  gap: 2px; margin-top: 4px;
+  padding: 8px 10px;
+  background: rgba(255,255,255,0.02);
+  border-radius: 4px;
+  font-size: 11px;
+}
+.benchmark-row {
+  display: flex; justify-content: space-between; align-items: baseline;
+}
+.benchmark-row.benchmark-delta {
+  padding-top: 4px;
+  margin-top: 2px;
+  border-top: 1px solid var(--border);
+}
+.benchmark-label { color: var(--text3); }
+.benchmark-value {
+  color: var(--text); font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.benchmark-value.positive { color: var(--green); }
+.benchmark-value.negative { color: var(--red); }
+
+.benchmark-controls {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 6px;
+}
+.benchmark-select {
+  font-size: 11px;
+  padding: 4px 8px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.benchmark-select:focus { outline: none; border-color: var(--blue); }
+.benchmark-controls .cta-card-btn { margin-top: 0; }
+
 /* -- Drawer --------------------------------------------- */
 .drawer-backdrop {
   position: fixed; inset: 0;
