@@ -22,7 +22,7 @@ from datetime import datetime
 CARD_VERSIONS = {
     "concentration": 2,   # v2: empty-state card when below threshold (no more silent hide)
     "benchmark":     2,   # v2: empty-state card when within threshold
-    "risk_news":     2,   # v2: empty-state card when no items / claude unavailable
+    "risk_news":     3,   # v3: FMP news endpoint migrated v3/stock_news -> stable/news/stock
 }
 
 CARD_IDS = list(CARD_VERSIONS.keys())

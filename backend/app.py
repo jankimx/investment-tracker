@@ -1514,9 +1514,12 @@ def fetch_news(symbol, since_date=None, limit=NEWS_LIMIT_PER_SYMBOL):
         return []
 
     since = since_date or (datetime.utcnow() - timedelta(days=NEWS_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    # FMP deprecated /api/v3/stock_news (returns 403 "Legacy Endpoint"). The
+    # current endpoint lives under /stable/news/stock — same auth, similar
+    # response shape, `symbols=` (plural) param. Matches what analyzer.py uses.
     try:
-        url = ("https://financialmodelingprep.com/api/v3/stock_news"
-               f"?tickers={symbol}&from={since}&limit={limit}&apikey={FMP_KEY}")
+        url = ("https://financialmodelingprep.com/stable/news/stock"
+               f"?symbols={symbol}&from={since}&limit={limit}&apikey={FMP_KEY}")
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=15) as r:
             data = json.loads(r.read().decode())
@@ -1539,9 +1542,10 @@ def fetch_news(symbol, since_date=None, limit=NEWS_LIMIT_PER_SYMBOL):
             "id":        nid,
             "title":     title,
             "url":       link,
-            "published": n.get("publishedDate"),
-            "site":      n.get("site"),
-            "summary":   (n.get("text") or "")[:500],
+            # /stable/news/stock returns `publishedDate` (camelCase), same as v3
+            "published": n.get("publishedDate") or n.get("published"),
+            "site":      n.get("site") or n.get("publisher"),
+            "summary":   (n.get("text") or n.get("snippet") or "")[:500],
         })
 
     try:
@@ -1799,8 +1803,8 @@ def insights_debug_news(symbol):
         return jsonify({"error": "FMP_API_KEY not configured"}), 503
 
     since = (datetime.utcnow() - timedelta(days=NEWS_WINDOW_DAYS)).strftime("%Y-%m-%d")
-    url   = ("https://financialmodelingprep.com/api/v3/stock_news"
-             f"?tickers={symbol}&from={since}&limit=10&apikey={FMP_KEY}")
+    url   = ("https://financialmodelingprep.com/stable/news/stock"
+             f"?symbols={symbol}&from={since}&limit=10&apikey={FMP_KEY}")
     url_masked = url.replace(FMP_KEY, "***")
     out = {"url": url_masked}
     try:
@@ -1899,18 +1903,27 @@ def benchmark_series(symbol):
 @app.route("/insights/refresh", methods=["POST"])
 @require_auth
 def insights_refresh():
-    """Force regenerate today's insights for all cards. Returns 202 immediately
-    with the list of cards whose generation was spawned."""
+    """Force regenerate today's insights for all cards. Also wipes today's
+    news cache so the risk card actually re-fetches from FMP (otherwise a
+    cached-empty doc from an earlier failed fetch would short-circuit the
+    pipeline). Returns 202 immediately."""
     from insights import CARD_IDS
     today = _today_str()
     spawned = []
+    # Drop today's news cache too — empty cached docs from a previous failed
+    # fetch otherwise stop us from re-trying.
+    news_deleted = news.delete_many({"date": today}).deleted_count
     for card_id in CARD_IDS:
         # Drop the cached doc and any stale lock so we can re-claim cleanly.
         CARD_COLLECTIONS[card_id].delete_one({"_id": today})
         _release_card_lock(today, card_id)
         _spawn_card_generation(today, card_id, trigger="manual")
         spawned.append(card_id)
-    return jsonify({"status": "generating", "generating": spawned}), 202
+    return jsonify({
+        "status":          "generating",
+        "generating":      spawned,
+        "news_invalidated": news_deleted,
+    }), 202
 
 
 # -- Stock Analyzer ---------------------------------------
