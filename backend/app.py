@@ -2337,10 +2337,18 @@ def run_oneshot_backfill(since, marker_id):
         )
 
 
+# Spawn as a daemon thread so module load returns immediately. The
+# previous version ran synchronously and could exceed Railway's 30s
+# healthcheck window when FMP backfill spanned 10+ symbols. The marker
+# in `meta` still ensures only one worker performs the actual work.
 try:
-    run_oneshot_backfill(since="2025-05-09", marker_id="oneshot_backfill_2025_05_09")
+    threading.Thread(
+        target=run_oneshot_backfill,
+        kwargs={"since": "2025-05-09", "marker_id": "oneshot_backfill_2025_05_09"},
+        daemon=True,
+    ).start()
 except Exception as e:
-    print(f"[Backfill] unexpected outer failure: {e}")
+    print(f"[Backfill] could not spawn one-shot thread: {e}")
 
 
 if __name__ == "__main__":
