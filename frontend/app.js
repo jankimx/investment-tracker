@@ -1845,7 +1845,12 @@ function buildCtaCard(card) {
   if (card.prose) {
     const prose = document.createElement('div');
     prose.className = 'cta-card-prose';
-    prose.textContent = card.prose;
+    // Risk card prose runs 2-3 sentences; the full version reads better in
+    // the drawer. On the card we keep only the first sentence (capped) so
+    // the card stays compact.
+    prose.textContent = card.id === 'risk_news'
+      ? _shortenProse(card.prose, 120)
+      : card.prose;
     wrap.appendChild(prose);
   }
 
@@ -1857,6 +1862,15 @@ function buildCtaCard(card) {
     wrap.appendChild(btn);
   }
   return wrap;
+}
+
+function _shortenProse(prose, maxChars) {
+  if (!prose) return '';
+  // First sentence (split on terminator + whitespace), fall back to whole string.
+  const match = prose.match(/^[^.!?]+[.!?]/);
+  let out = (match ? match[0] : prose).trim();
+  if (out.length > maxChars) out = out.slice(0, maxChars - 1).trimEnd() + '…';
+  return out;
 }
 
 function buildEmptyStateCard(card) {
