@@ -542,3 +542,75 @@ tr:hover td { background: var(--bg2); }
   color: var(--blue); text-decoration: none; margin-left: 4px;
 }
 .drawer-provenance a:hover { text-decoration: underline; }
+
+/* -- Risk drawer ---------------------------------------- */
+.verification-banner {
+  display: flex; align-items: flex-start; gap: 8px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  background: rgba(255,179,71,0.10);
+  border: 1px solid rgba(255,179,71,0.30);
+  border-radius: var(--radius);
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.5;
+}
+.verification-icon {
+  font-size: 14px; color: #ffb347;
+}
+
+.risk-item {
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--text3);
+  border-radius: 4px;
+}
+.risk-item.risk-warn     { border-left-color: #ffb347; }
+.risk-item.risk-critical { border-left-color: var(--red); }
+
+.risk-item-top {
+  display: flex; gap: 8px; align-items: center;
+  margin-bottom: 6px;
+  font-size: 10px;
+}
+.risk-sev-badge {
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.08);
+  color: var(--text2);
+}
+.risk-sev-badge.risk-sev-warn     { color: #ffb347; background: rgba(255,179,71,0.10); }
+.risk-sev-badge.risk-sev-critical { color: var(--red); background: rgba(255,71,87,0.10); }
+
+.risk-direction { color: var(--text3); }
+.risk-direction.risk-downside { color: var(--red); }
+.risk-direction.risk-upside   { color: var(--green); }
+
+.risk-summary {
+  font-size: 12px; color: var(--text);
+  line-height: 1.45;
+  margin-bottom: 6px;
+}
+
+.risk-sources {
+  list-style: none;
+  padding-left: 0;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text2);
+  line-height: 1.5;
+}
+.risk-sources li { margin-bottom: 4px; }
+.risk-sources a  { color: var(--blue); text-decoration: none; }
+.risk-sources a:hover { text-decoration: underline; }
+.risk-source-meta  { color: var(--text3); }
+.risk-source-label { color: var(--text3); }
+.risk-source-detail {
+  font-size: 10px; color: var(--text3);
+  margin-top: 2px; line-height: 1.5;
+  padding-left: 8px; border-left: 1px solid var(--border);
+}

@@ -49,6 +49,7 @@ meta     = db["meta"]
 analyses = db["analyses"]
 sessions = db["sessions"]
 insights = db["insights"]    # NEW: one document per day, drives the dashboard CTA row
+news     = db["news"]        # NEW: per-symbol-per-day cache of stock_news headlines
 
 # Create indexes once at startup
 try:
@@ -72,6 +73,7 @@ for spec, coll, name in [
     ([("date", 1), ("platform", 1), ("stock", 1)], entries, "entries_unique"),
     ([("symbol", 1), ("date", 1)], prices,   "prices_unique"),
     ([("platform", 1), ("stock", 1), ("date", 1)], balances, "balances_unique"),
+    ([("symbol", 1), ("date", 1)], news,     "news_unique"),
 ]:
     try:
         coll.create_index(spec, unique=True, name=name)
@@ -1458,6 +1460,72 @@ def _release_insights_lock(today):
     meta.delete_one({"_id": f"insights_lock_{today}"})
 
 
+NEWS_WINDOW_DAYS = 7
+NEWS_LIMIT_PER_SYMBOL = 10
+
+
+def fetch_news(symbol, since_date=None, limit=NEWS_LIMIT_PER_SYMBOL):
+    """Return today's cached news items for `symbol`. On cache miss, hits FMP
+    /stock_news, normalizes the response, and persists to the news collection
+    for the rest of the day. Returns a list of items (possibly empty)."""
+    symbol = symbol.upper().strip()
+    today  = datetime.utcnow().strftime("%Y-%m-%d")
+    cached = news.find_one({"symbol": symbol, "date": today})
+    if cached:
+        return cached.get("items", [])
+
+    if not FMP_KEY:
+        return []
+
+    since = since_date or (datetime.utcnow() - timedelta(days=NEWS_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    try:
+        url = ("https://financialmodelingprep.com/api/v3/stock_news"
+               f"?tickers={symbol}&from={since}&limit={limit}&apikey={FMP_KEY}")
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode())
+    except Exception as ex:
+        print(f"[News] fetch failed for {symbol}: {ex}")
+        return []
+
+    if not isinstance(data, list):
+        return []
+
+    items = []
+    for n in data[:limit]:
+        title = (n.get("title") or "").strip()
+        link  = (n.get("url") or "").strip()
+        if not title or not link:
+            continue
+        # Stable ID lets the Claude verification pass cite a specific source.
+        nid = "news_" + base64.urlsafe_b64encode(link.encode()).decode().rstrip("=")[:20]
+        items.append({
+            "id":        nid,
+            "title":     title,
+            "url":       link,
+            "published": n.get("publishedDate"),
+            "site":      n.get("site"),
+            "summary":   (n.get("text") or "")[:500],
+        })
+
+    try:
+        news.replace_one(
+            {"symbol": symbol, "date": today},
+            {
+                "_id":        f"{symbol}_{today}",
+                "symbol":     symbol,
+                "date":       today,
+                "fetched_at": datetime.utcnow().isoformat(),
+                "items":      items,
+            },
+            upsert=True,
+        )
+    except Exception as ex:
+        print(f"[News] cache upsert failed for {symbol}: {ex}")
+
+    return items
+
+
 def _ytd_start_date():
     """First calendar day of the current year as YYYY-MM-DD (UTC)."""
     return datetime.utcnow().strftime("%Y") + "-01-01"
@@ -1512,8 +1580,18 @@ def _generate_and_persist_insights(today, trigger):
         print(f"[Insights] In-process generation already running, skipping")
         return
     try:
-        from insights import generate_insights
-        from claude_synthesis import summarize_concentration, summarize_benchmark
+        from insights import (
+            generate_insights,
+            collect_risk_inputs,
+            synthesize_risk_card_verified,
+        )
+        from claude_synthesis import (
+            summarize_concentration,
+            summarize_benchmark,
+            extract_risk_items,
+            verify_risk_items,
+            synthesize_risk_prose,
+        )
 
         def prose_fn(card_id, stats):
             if card_id == "concentration":
@@ -1522,11 +1600,26 @@ def _generate_and_persist_insights(today, trigger):
                 return summarize_benchmark(stats)
             return None
 
+        def get_latest_analysis(sym):
+            return analyses.find_one({"symbol": sym}, sort=[("analyzed_at", DESCENDING)])
+
+        def risk_fn(positions):
+            inputs = collect_risk_inputs(positions, fetch_news, get_latest_analysis)
+            if not inputs.get("by_symbol"):
+                return None
+            return synthesize_risk_card_verified(
+                inputs,
+                extract_fn=extract_risk_items,
+                verify_fn=verify_risk_items,
+                synthesize_fn=synthesize_risk_prose,
+            )
+
         positions = derive_all_positions()
         doc = generate_insights(
             positions,
             prose_fn=(prose_fn if CLAUDE_KEY else None),
             benchmark_fn=_load_benchmark_data_for_insights,
+            risk_fn=(risk_fn if CLAUDE_KEY else None),
             trigger=trigger,
         )
         insights.replace_one({"_id": today}, {"_id": today, **doc}, upsert=True)
@@ -1595,6 +1688,27 @@ def insights_dashboard():
             daemon=True,
         ).start()
     return jsonify(_generating_response(started_at))
+
+
+@app.route("/insights/risk-news/<symbol>", methods=["GET"])
+@require_auth
+def insights_risk_news(symbol):
+    """Drill-down for a single holding's news + analyzer signals. Used by the
+    risk card's drawer so the user can read the underlying sources directly."""
+    symbol = symbol.upper().strip()
+    items = fetch_news(symbol)
+    analysis = analyses.find_one({"symbol": symbol}, sort=[("analyzed_at", DESCENDING)])
+
+    signals = []
+    if analysis:
+        from insights import _extract_analyzer_signals  # lazy import to avoid cycle
+        signals = _extract_analyzer_signals(symbol, analysis)
+
+    return jsonify({
+        "symbol":  symbol,
+        "news":    items,
+        "signals": signals,
+    })
 
 
 @app.route("/benchmark/<symbol>", methods=["GET"])

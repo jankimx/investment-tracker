@@ -28,6 +28,25 @@ BENCHMARK_CRITICAL_DELTA_PP    = 5.0   # critical severity at >= 5pp
 DEFAULT_BENCHMARK              = "SPY"
 AVAILABLE_BENCHMARKS           = ["SPY", "QQQ", "VTI"]
 
+RISK_VERIFY_MAX_ATTEMPTS       = 5
+RISK_MIN_ITEMS_FOR_CARD        = 1     # show card with even one notable item
+RISK_CRITICAL_THRESHOLD        = 1     # ≥1 critical-severity item bumps card to critical
+
+# Title keywords used by the conservative deterministic fallback. If Claude
+# verification keeps failing, we fall back to extracting items whose source
+# titles contain one of these terms — output is guaranteed citable to source.
+RISK_KEYWORDS_DOWNSIDE = [
+    "downgrade", "downgrades", "miss", "missed",
+    "probe", "investigation", "lawsuit", "fraud",
+    "warning", "recall", "scandal", "suspended",
+    "guidance cut", "guidance lowered",
+]
+RISK_KEYWORDS_UPSIDE = [
+    "upgrade", "upgrades", "beats", "exceeds", "tops",
+    "buyback", "dividend hike", "raises guidance", "raised guidance",
+    "approves", "expansion",
+]
+
 
 # -- Concentration card -------------------------------------------
 def compute_concentration(positions):
@@ -257,8 +276,306 @@ def build_benchmark_card(stats, prose=None):
     }
 
 
+# -- Risk / news card ---------------------------------------------
+def collect_risk_inputs(positions, fetch_news_fn, get_analysis_fn):
+    """Gather raw news + analyzer signals for held symbols. Returns a dict
+    structured for downstream Claude prompting:
+
+        {
+          "by_symbol": {
+            "AAPL": {"news": [...], "signals": [...]},
+            ...
+          },
+          "sources": {source_id: source_dict, ...}   # citation lookup
+        }
+
+    Args:
+        positions:        derived positions list.
+        fetch_news_fn:    callable(symbol) -> list of news item dicts.
+                          Each item must have id, title, url, published.
+        get_analysis_fn:  callable(symbol) -> cached analysis doc or None.
+    """
+    symbols = sorted({
+        p["stock"].upper() for p in positions
+        if (p.get("value") or 0) > 0 and p["stock"].upper() != "TOTAL"
+    })
+
+    by_symbol = {}
+    sources   = {}
+
+    for sym in symbols:
+        try:
+            news_items = fetch_news_fn(sym) or []
+        except Exception as e:
+            print(f"[Risk] news fetch failed for {sym}: {e}")
+            news_items = []
+
+        try:
+            analysis = get_analysis_fn(sym)
+        except Exception as e:
+            print(f"[Risk] analysis lookup failed for {sym}: {e}")
+            analysis = None
+
+        signals = _extract_analyzer_signals(sym, analysis)
+
+        if not news_items and not signals:
+            continue
+
+        by_symbol[sym] = {"news": news_items, "signals": signals}
+        for n in news_items:
+            if n.get("id"):
+                sources[n["id"]] = {"type": "news", "symbol": sym, **n}
+        for s in signals:
+            if s.get("id"):
+                sources[s["id"]] = {"type": "analyzer", **s}
+
+    return {"by_symbol": by_symbol, "sources": sources}
+
+
+def _extract_analyzer_signals(symbol, analysis):
+    """Turn a cached analysis doc into a flat list of signals usable as
+    citation sources. Drops anything not high-signal (neutral insider, low
+    value-trap risk, etc.) so we don't dilute the risk card with noise."""
+    if not analysis:
+        return []
+    scores = analysis.get("scores") or {}
+    out = []
+
+    for i, flag in enumerate(scores.get("red_flags") or []):
+        title = flag.get("title")
+        if not title:
+            continue
+        out.append({
+            "id":       f"analyzer_{symbol}_redflag_{i}",
+            "symbol":   symbol,
+            "kind":     "red_flag",
+            "severity": flag.get("severity", "medium"),
+            "title":    title,
+            "detail":   flag.get("detail") or flag.get("why_it_matters") or "",
+        })
+
+    trap = scores.get("value_trap") or {}
+    if trap.get("risk_level") in ("high", "critical"):
+        out.append({
+            "id":       f"analyzer_{symbol}_valuetrap",
+            "symbol":   symbol,
+            "kind":     "value_trap",
+            "severity": "high" if trap.get("risk_level") == "high" else "critical",
+            "title":    f"Elevated value-trap risk ({trap.get('risk_level')})",
+            "detail":   trap.get("detail") or trap.get("reasoning") or "",
+        })
+
+    insider = scores.get("insider") or {}
+    insider_signal = insider.get("signal")
+    if insider_signal in ("cluster_buying", "cluster_selling", "buying", "selling"):
+        out.append({
+            "id":       f"analyzer_{symbol}_insider",
+            "symbol":   symbol,
+            "kind":     "insider",
+            "severity": "medium",
+            "title":    f"Notable insider activity: {insider_signal.replace('_', ' ')}",
+            "detail":   insider.get("detail") or "",
+        })
+
+    return out
+
+
+def build_risk_card(verified, prose=None):
+    """Turn verified risk items + verification metadata into the card.
+    Returns None when there are zero items to render."""
+    items = verified.get("items") or []
+    if len(items) < RISK_MIN_ITEMS_FOR_CARD:
+        return None
+
+    by_severity = {"critical": 0, "warn": 0, "info": 0}
+    for it in items:
+        sev = it.get("severity") if it.get("severity") in by_severity else "info"
+        by_severity[sev] += 1
+
+    if by_severity["critical"] >= RISK_CRITICAL_THRESHOLD:
+        severity = "critical"
+    elif by_severity["warn"] > 0:
+        severity = "warn"
+    else:
+        severity = "info"
+
+    n_symbols = len({it.get("symbol") for it in items if it.get("symbol")})
+    headline = (
+        f"{n_symbols} holding{'s' if n_symbols != 1 else ''} "
+        f"with notable activity"
+    )
+
+    return {
+        "id":        "risk_news",
+        "show":      True,
+        "severity":  severity,
+        "headline":  headline,
+        "cta_label": "View summary",
+        "prose":     prose,
+        "verification": verified.get("verification"),
+        "detail": {
+            "items":   items,
+            "trigger": {
+                "rule":      "items_gte",
+                "threshold": RISK_MIN_ITEMS_FOR_CARD,
+                "actual":    len(items),
+            },
+        },
+    }
+
+
+def conservative_risk_extract(inputs):
+    """Deterministic fallback. Pulls items whose source content is trivially
+    citable (news titles matching a keyword whitelist; analyzer signals
+    verbatim). Guaranteed to verify because every output claim is a direct
+    pull from the source text."""
+    items = []
+    for symbol, blob in (inputs.get("by_symbol") or {}).items():
+        for n in (blob.get("news") or []):
+            title = (n.get("title") or "").lower()
+            direction = None
+            if any(k in title for k in RISK_KEYWORDS_DOWNSIDE):
+                direction = "downside"
+            elif any(k in title for k in RISK_KEYWORDS_UPSIDE):
+                direction = "upside"
+            if direction is None:
+                continue
+            items.append({
+                "symbol":     symbol,
+                "direction":  direction,
+                "severity":   "warn" if direction == "downside" else "info",
+                "summary":    n.get("title"),
+                "source_ids": [n["id"]],
+            })
+        for s in (blob.get("signals") or []):
+            kind = s.get("kind")
+            direction = "downside" if kind in ("red_flag", "value_trap") else "info"
+            severity  = s.get("severity") or ("warn" if direction == "downside" else "info")
+            # collapse analyzer-severity vocabulary into the card's tiers
+            severity  = {"high": "critical", "medium": "warn", "low": "info"}.get(severity, severity)
+            if severity not in ("critical", "warn", "info"):
+                severity = "warn"
+            items.append({
+                "symbol":     s["symbol"],
+                "direction":  direction if direction in ("upside", "downside") else "downside",
+                "severity":   severity,
+                "summary":    s.get("title"),
+                "source_ids": [s["id"]],
+            })
+    return items
+
+
+def _resolve_sources(items, sources):
+    """Inline the full source dicts each item cites so the frontend can
+    render links + attribution without a second API round-trip. Unknown
+    source_ids are dropped silently."""
+    resolved = []
+    for it in items:
+        out = dict(it)
+        out_sources = []
+        for sid in (it.get("source_ids") or []):
+            src = sources.get(sid)
+            if not src:
+                continue
+            out_sources.append({
+                "id":        sid,
+                "type":      src.get("type"),
+                "title":     src.get("title"),
+                "url":       src.get("url"),         # None for analyzer sources
+                "published": src.get("published"),
+                "site":      src.get("site"),
+                "kind":      src.get("kind"),        # analyzer-specific
+                "detail":    src.get("detail"),      # analyzer-specific
+            })
+        out["sources"] = out_sources
+        resolved.append(out)
+    return resolved
+
+
+def synthesize_risk_card_verified(inputs, extract_fn, verify_fn, synthesize_fn,
+                                  max_attempts=RISK_VERIFY_MAX_ATTEMPTS):
+    """Run the bounded write -> verify loop. On failure after max_attempts,
+    fall back to deterministic conservative extraction so we still ship
+    verifiable output. Output is ALWAYS verified.
+
+    Args:
+        inputs:         dict from collect_risk_inputs(); keys "by_symbol" + "sources".
+        extract_fn:     callable(inputs, prior_critique=None) -> list of items.
+        verify_fn:      callable(items, sources) -> {grounded, unsupported_claims}.
+        synthesize_fn:  callable(items) -> str prose.
+
+    Returns dict with items, prose, verification meta — or None if there
+    are no inputs to summarize at all.
+    """
+    if not inputs.get("by_symbol"):
+        return None
+
+    last_critique  = None
+    claude_calls   = 0
+
+    for attempt in range(max_attempts):
+        try:
+            items = extract_fn(inputs, prior_critique=last_critique)
+            claude_calls += 1
+            verification = verify_fn(items, inputs["sources"])
+            claude_calls += 1
+            if verification.get("grounded"):
+                prose = None
+                try:
+                    prose = synthesize_fn(items)
+                    claude_calls += 1
+                except Exception as e:
+                    print(f"[Risk] Synthesize failed (verified path): {e}")
+                return {
+                    "items":        _resolve_sources(items, inputs["sources"]),
+                    "prose":        prose,
+                    "claude_calls": claude_calls,
+                    "verification": {
+                        "passes":          attempt + 1,
+                        "mode":            "verified",
+                        "claims_total":    len(items),
+                        "claims_grounded": len(items),
+                        "warnings":        [],
+                    },
+                }
+            last_critique = verification.get("unsupported_claims") or []
+            print(f"[Risk] Attempt {attempt+1} failed verification "
+                  f"({len(last_critique)} issues)")
+        except Exception as e:
+            print(f"[Risk] Attempt {attempt+1} errored: {type(e).__name__}: {e}")
+            last_critique = [f"Previous attempt errored: {e}"]
+
+    # Conservative deterministic fallback — guaranteed citable.
+    print(f"[Risk] Falling back to conservative mode after {max_attempts} attempts")
+    items = conservative_risk_extract(inputs)
+    prose = None
+    if items:
+        try:
+            prose = synthesize_fn(items)
+            claude_calls += 1
+        except Exception as e:
+            print(f"[Risk] Conservative synthesize failed: {e}")
+
+    return {
+        "items":        _resolve_sources(items, inputs["sources"]),
+        "prose":        prose,
+        "claude_calls": claude_calls,
+        "verification": {
+            "passes":          max_attempts,
+            "mode":            "conservative",
+            "claims_total":    len(items),
+            "claims_grounded": len(items),
+            "warnings": [
+                "Auto-verification did not pass after retries; fell back to "
+                "conservative title-only extraction."
+            ],
+        },
+    }
+
+
 # -- Orchestrator -------------------------------------------------
-def generate_insights(positions, prose_fn=None, benchmark_fn=None, trigger="lazy"):
+def generate_insights(positions, prose_fn=None, benchmark_fn=None,
+                      risk_fn=None, trigger="lazy"):
     """Assemble today's insights document.
 
     Args:
@@ -270,6 +587,11 @@ def generate_insights(positions, prose_fn=None, benchmark_fn=None, trigger="lazy
                        benchmark_closes_by_symbol). Caller provides this
                        (it needs DB / FMP access). May raise; on exception
                        the benchmark card is skipped.
+        risk_fn:       optional callable(positions) -> {items, prose,
+                       verification, claude_calls} (the output of
+                       synthesize_risk_card_verified). Caller wires the
+                       Claude extract/verify/synthesize functions in.
+                       Returns None when there are no inputs to summarize.
         trigger:       "lazy", "cron", or "manual" — recorded for telemetry.
 
     Returns the document body to be stored in the `insights` collection
@@ -308,7 +630,20 @@ def generate_insights(positions, prose_fn=None, benchmark_fn=None, trigger="lazy
         if benchmark_stats:
             _attach("benchmark", benchmark_stats, build_benchmark_card)
 
-    # Phase 3: risk/news card
+    # Risk / news card uses its own verified-output pipeline (write -> verify
+    # loop with conservative fallback). Prose is generated INSIDE that
+    # pipeline, so we don't go through _attach / prose_fn here.
+    if risk_fn is not None:
+        try:
+            verified = risk_fn(positions)
+        except Exception as e:
+            print(f"[Insights] Risk pipeline failed: {type(e).__name__}: {e}")
+            verified = None
+        if verified:
+            claude_calls += verified.get("claude_calls", 0)
+            card = build_risk_card(verified, prose=verified.get("prose"))
+            if card:
+                cards.append(card)
 
     finished = datetime.utcnow()
 

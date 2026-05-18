@@ -1970,6 +1970,8 @@ function openInsightDrawer(card) {
 
   if (card.id === 'concentration') {
     renderConcentrationDetail(content, card.detail || {});
+  } else if (card.id === 'risk_news') {
+    renderRiskDetail(content, card.detail || {}, card.verification || {});
   } else {
     const placeholder = document.createElement('div');
     placeholder.className = 'drawer-prose';
@@ -2081,6 +2083,130 @@ function _drawerSection(titleText, childNodes) {
   section.appendChild(title);
   childNodes.forEach(n => section.appendChild(n));
   return section;
+}
+
+// -- Risk / news drawer ------------------------------------
+function renderRiskDetail(parent, detail, verification) {
+  // Verification badge first — if conservative or has warnings, surface it
+  // right at the top so the reader knows to treat the prose with caution.
+  if (verification && (verification.mode === 'conservative' || (verification.warnings || []).length)) {
+    const banner = document.createElement('div');
+    banner.className = 'verification-banner';
+    const icon = document.createElement('span');
+    icon.className = 'verification-icon';
+    icon.textContent = '⚠';
+    const text = document.createElement('span');
+    text.textContent = verification.mode === 'conservative'
+      ? 'Auto-verification fell back to conservative mode — items shown are direct from sources, not analyzed.'
+      : 'Auto-verification flagged items — review sources before acting.';
+    banner.appendChild(icon);
+    banner.appendChild(text);
+    parent.appendChild(banner);
+  }
+
+  const items = detail.items || [];
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'drawer-prose';
+    empty.textContent = 'No notable items.';
+    parent.appendChild(empty);
+    return;
+  }
+
+  // Group by symbol so a single ticker's items render together.
+  const grouped = new Map();
+  items.forEach(it => {
+    const sym = it.symbol || '?';
+    if (!grouped.has(sym)) grouped.set(sym, []);
+    grouped.get(sym).push(it);
+  });
+
+  // Sort symbols by their highest severity (critical first).
+  const sevWeight = it => SEVERITY_ORDER[it.severity] ?? 99;
+  const orderedSymbols = [...grouped.entries()]
+    .map(([sym, its]) => ({ sym, its, top: Math.min(...its.map(sevWeight)) }))
+    .sort((a, b) => a.top - b.top)
+    .map(g => [g.sym, g.its]);
+
+  orderedSymbols.forEach(([symbol, syms]) => {
+    parent.appendChild(_drawerSection(symbol, syms.map(it => buildRiskItem(it))));
+  });
+
+  // Provenance footer
+  const prov = document.createElement('div');
+  prov.className = 'drawer-provenance';
+  const noteText = `Sources: FMP stock news + cached analyzer signals. Run /analyze on a ticker to refresh signals.`;
+  prov.appendChild(document.createTextNode(noteText));
+  parent.appendChild(prov);
+}
+
+function buildRiskItem(item) {
+  const row = document.createElement('div');
+  row.className = 'risk-item risk-' + (item.severity || 'info');
+
+  const top = document.createElement('div');
+  top.className = 'risk-item-top';
+  const sev = document.createElement('span');
+  sev.className = 'risk-sev-badge risk-sev-' + (item.severity || 'info');
+  sev.textContent = (item.severity || 'info').toUpperCase();
+  const dir = document.createElement('span');
+  dir.className = 'risk-direction risk-' + (item.direction || 'info');
+  dir.textContent = item.direction === 'upside' ? '↑ upside' :
+                    item.direction === 'downside' ? '↓ downside' : 'info';
+  top.appendChild(sev);
+  top.appendChild(dir);
+  row.appendChild(top);
+
+  const summary = document.createElement('div');
+  summary.className = 'risk-summary';
+  summary.textContent = item.summary || '';
+  row.appendChild(summary);
+
+  // Sources are pre-resolved by the backend (item.sources, not source_ids).
+  const sources = item.sources || [];
+  if (sources.length) {
+    const list = document.createElement('ul');
+    list.className = 'risk-sources';
+    sources.forEach(src => {
+      const li = document.createElement('li');
+      if (src.type === 'news') {
+        if (src.url) {
+          const a = document.createElement('a');
+          a.href = src.url;
+          a.target = '_blank';
+          a.rel = 'noopener noreferrer';
+          a.textContent = src.title || src.url;
+          li.appendChild(a);
+          if (src.site || src.published) {
+            const meta = document.createElement('span');
+            meta.className = 'risk-source-meta';
+            const bits = [src.site, (src.published || '').slice(0, 10)].filter(Boolean);
+            meta.textContent = ' — ' + bits.join(', ');
+            li.appendChild(meta);
+          }
+        } else {
+          li.textContent = src.title || '(news)';
+        }
+      } else {
+        // Analyzer signal -- no URL; render title + optional detail.
+        const label = document.createElement('span');
+        label.className = 'risk-source-label';
+        label.textContent = (src.kind || 'analyzer').replace('_', ' ') + ': ';
+        li.appendChild(label);
+        li.appendChild(document.createTextNode(src.title || ''));
+        if (src.detail) {
+          const detail = document.createElement('div');
+          detail.className = 'risk-source-detail';
+          detail.textContent = src.detail;
+          li.appendChild(detail);
+        }
+      }
+      list.appendChild(li);
+    });
+    row.appendChild(list);
+  }
+
+  return row;
 }
 
 // -- Benchmark overlay -------------------------------------

@@ -209,6 +209,150 @@ Rules you must follow:
 5. No markdown, no quotes, no preamble. Output the sentence only."""
 
 
+# --- Risk / news card prompts ---
+# Three-pass design: extract -> verify -> synthesize. See INSIGHTS_DESIGN.md §6.
+
+RISK_EXTRACT_SYSTEM = """You categorize raw stock news + analyzer signals into structured "notable items" for a dashboard insights card.
+
+Rules you must follow:
+1. ONLY use the inputs provided. Do NOT invent facts, prices, or interpretations not present in a source.
+2. Each item you output MUST cite at least one source_id from the SOURCES list using its exact label.
+3. Output strict JSON only (no markdown, no preamble) matching the schema described in the user message.
+4. Be conservative: if a source is ambiguous, skip it rather than over-interpret.
+5. Direction is "upside" or "downside" only. Severity is "info", "warn", or "critical"."""
+
+
+RISK_VERIFY_SYSTEM = """You audit a list of proposed risk items against their source materials. Your job is to catch ungrounded claims — items whose summary states things the cited sources do not support.
+
+Rules:
+1. For each item, confirm every cited source_id appears in SOURCES.
+2. Confirm the item's summary is a fair interpretation of what those sources say. If the summary adds facts not in the sources, mark it unsupported.
+3. Output strict JSON only. No markdown."""
+
+
+RISK_SYNTHESIZE_SYSTEM = """You write a 2-3 sentence dashboard summary based on a pre-validated list of risk items. Do NOT introduce facts beyond what the items contain. No markdown, no preamble — just the prose."""
+
+
+def _render_sources_for_prompt(sources):
+    """Compact one-line-per-source rendering Claude can scan quickly."""
+    lines = []
+    for sid, src in sources.items():
+        if src.get("type") == "news":
+            published = (src.get("published") or "")[:10]
+            site = src.get("site") or ""
+            lines.append(
+                f"[{sid}] news | {src.get('symbol','?')} | {published} | {site} | "
+                f"{(src.get('title') or '')[:140]}"
+            )
+        else:
+            lines.append(
+                f"[{sid}] analyzer | {src.get('symbol','?')} | {src.get('kind','?')} "
+                f"({src.get('severity','?')}) | {(src.get('title') or '')[:140]}"
+            )
+    return "\n".join(lines)
+
+
+def _extract_json(text):
+    """Pull the first JSON object/array out of Claude's response, tolerating
+    markdown fences and leading/trailing prose."""
+    text = (text or "").strip()
+    # Strip code fences if present
+    if text.startswith("```"):
+        text = text.split("```", 2)
+        text = text[1] if len(text) > 1 else ""
+        if text.lower().startswith("json"):
+            text = text[4:].lstrip()
+        text = text.split("```", 1)[0]
+    # Find the first { or [ and the matching last } or ]
+    starts = [i for i in (text.find("["), text.find("{")) if i >= 0]
+    if not starts:
+        raise ValueError("No JSON found in response")
+    start = min(starts)
+    end = max(text.rfind("]"), text.rfind("}"))
+    if end <= start:
+        raise ValueError("Unbalanced JSON brackets in response")
+    return json.loads(text[start:end + 1])
+
+
+def extract_risk_items(inputs, prior_critique=None):
+    """Pass 1: extract structured items from raw news + analyzer signals.
+    `inputs` is the dict returned by insights.collect_risk_inputs().
+    `prior_critique` is the unsupported_claims list from a failed verify pass
+    (None on the first attempt). Returns a list of item dicts."""
+    sources_text = _render_sources_for_prompt(inputs.get("sources") or {})
+    critique_text = ""
+    if prior_critique:
+        critique_text = (
+            "\n\nA previous attempt failed verification. Issues to avoid this time:\n"
+            + "\n".join(f"- {c}" for c in prior_critique[:10])
+        )
+
+    prompt = f"""SOURCES (use only these; cite by exact id in brackets):
+{sources_text}
+
+Output JSON array of items. Each item:
+{{
+  "symbol":     "<TICKER>",
+  "direction":  "upside" | "downside",
+  "severity":   "info" | "warn" | "critical",
+  "summary":    "<one short factual sentence drawn from the sources>",
+  "source_ids": ["<source_id_1>", ...]
+}}
+
+Include only items that are clearly notable (regulatory action, upgrade/downgrade, earnings surprise, material insider activity, declared red flag, etc.). Skip routine coverage.{critique_text}
+
+Output the JSON array only — no markdown, no preamble."""
+    raw = claude_complete(prompt, RISK_EXTRACT_SYSTEM, max_tokens=2000)
+    items = _extract_json(raw)
+    if not isinstance(items, list):
+        raise ValueError("Extract did not return a JSON array")
+    return items
+
+
+def verify_risk_items(items, sources):
+    """Pass 2: verify every item cites real sources and is well-grounded.
+    Returns {grounded: bool, unsupported_claims: [strings]}."""
+    sources_text = _render_sources_for_prompt(sources)
+    items_text   = json.dumps(items, indent=2)
+
+    prompt = f"""SOURCES:
+{sources_text}
+
+PROPOSED ITEMS:
+{items_text}
+
+For each item:
+1. Every source_id in source_ids must appear (exactly) in SOURCES.
+2. The summary must be supported by what those cited sources actually say.
+
+Return JSON:
+{{
+  "grounded": true|false,
+  "unsupported_claims": [
+    "<one human-readable sentence per ungrounded claim, naming the source_id or item summary>"
+  ]
+}}
+
+Output JSON only."""
+    raw    = claude_complete(prompt, RISK_VERIFY_SYSTEM, max_tokens=600)
+    parsed = _extract_json(raw)
+    return {
+        "grounded":            bool(parsed.get("grounded")),
+        "unsupported_claims":  parsed.get("unsupported_claims") or [],
+    }
+
+
+def synthesize_risk_prose(items):
+    """Pass 3: turn validated items into a 2-3 sentence dashboard summary.
+    Cannot introduce new facts — only sees the items, never the raw sources."""
+    items_text = json.dumps(items, indent=2)
+    prompt = f"""VALIDATED ITEMS (use only these):
+{items_text}
+
+Write a 2-3 sentence summary for the user's portfolio dashboard. Mention specific tickers and group by direction (downside risks vs upside catalysts). Do NOT recommend buy/sell actions. Plain prose, no markdown."""
+    return claude_complete(prompt, RISK_SYNTHESIZE_SYSTEM, max_tokens=250).strip()
+
+
 def summarize_benchmark(stats, max_words=28):
     """Generate the action-framed sentence shown in the benchmark card.
     `stats` is the dict returned by insights.compute_benchmark_comparison().
