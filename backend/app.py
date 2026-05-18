@@ -2219,6 +2219,130 @@ def health():
         "scheduler":     "running"
     })
 
+# -- One-shot startup migration ---------------------------
+# Defined here at the very bottom of module load so all helpers it depends
+# on (backfill_prices_from_fmp, BENCHMARK_SYMBOLS) are already in scope.
+# Marker in `meta` makes this idempotent — first worker to win the
+# DuplicateKeyError race runs it; the rest skip on every subsequent boot.
+
+def run_oneshot_backfill(since, marker_id):
+    """One-shot data backfill. Moves each holding's earliest BUY transaction
+    back to `since` (preserving original date in `backfilled_from`) and pulls
+    historical EOD prices back to `since` for every held symbol + benchmarks.
+    Runs at most once per Mongo (gated by `marker_id` in the meta collection).
+    """
+    existing = meta.find_one({"_id": marker_id})
+    if existing and existing.get("done"):
+        return
+    if existing and not existing.get("done"):
+        # Previous attempt crashed mid-run; clear the lock and retry.
+        print(f"[Backfill/{marker_id}] previous attempt didn't finish; retrying")
+        meta.delete_one({"_id": marker_id})
+
+    try:
+        meta.insert_one({
+            "_id":        marker_id,
+            "since":      since,
+            "claimed_by": os.getpid(),
+            "started_at": datetime.utcnow().isoformat(),
+        })
+    except DuplicateKeyError:
+        return  # another worker just won the race
+
+    print(f"[Backfill/{marker_id}] starting since={since} (pid={os.getpid()})")
+    started = datetime.utcnow()
+
+    try:
+        # 1) Move earliest BUY per (platform, stock) back to `since` if later.
+        keys = set()
+        for r in txns.aggregate([
+            {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
+        ]):
+            gid      = r.get("_id") or {}
+            platform = gid.get("platform") if isinstance(gid, dict) else None
+            stock_v  = gid.get("stock")    if isinstance(gid, dict) else None
+            stock    = (stock_v or "").upper()
+            if platform and stock:
+                keys.add((platform, stock))
+
+        txn_updated = 0
+        txn_skipped = 0
+        for (platform, stock) in sorted(keys):
+            earliest = txns.find_one(
+                {"platform": platform, "stock": stock, "shares": {"$gt": 0}},
+                sort=[("date", ASCENDING)],
+            )
+            if not earliest:
+                txn_skipped += 1
+                continue
+            current = earliest.get("date", "")
+            if current and current <= since:
+                txn_skipped += 1
+                continue
+            txns.update_one(
+                {"_id": earliest["_id"]},
+                {"$set": {
+                    "date":            since,
+                    "backfilled_from": current,
+                    "backfilled_at":   datetime.utcnow().isoformat(),
+                }},
+            )
+            txn_updated += 1
+        print(f"[Backfill/{marker_id}] transactions: {txn_updated} moved, {txn_skipped} skipped")
+
+        # 2) Backfill historical prices in parallel.
+        symbols = sorted(
+            {stock for (_, stock) in keys if stock and stock != "TOTAL"}
+            | set(BENCHMARK_SYMBOLS)
+        )
+        inserted_total = 0
+        errors = []
+        if symbols:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                futures = {executor.submit(backfill_prices_from_fmp, sym, since): sym
+                           for sym in symbols}
+                for fut in as_completed(futures):
+                    sym = futures[fut]
+                    try:
+                        n = fut.result()
+                        inserted_total += n
+                    except Exception as e:
+                        errors.append(f"{sym}: {type(e).__name__}: {e}")
+        print(f"[Backfill/{marker_id}] prices: {inserted_total} rows across {len(symbols)} symbols, {len(errors)} errors")
+
+        meta.update_one(
+            {"_id": marker_id},
+            {"$set": {
+                "done":                  True,
+                "finished_at":           datetime.utcnow().isoformat(),
+                "duration_seconds":      round((datetime.utcnow() - started).total_seconds(), 1),
+                "transactions_updated":  txn_updated,
+                "transactions_skipped":  txn_skipped,
+                "prices_inserted":       inserted_total,
+                "symbols_count":         len(symbols),
+                "errors":                errors,
+            }},
+        )
+        print(f"[Backfill/{marker_id}] done")
+    except Exception as e:
+        import traceback
+        print(f"[Backfill/{marker_id}] FAILED: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+        meta.update_one(
+            {"_id": marker_id},
+            {"$set": {
+                "error":       f"{type(e).__name__}: {e}",
+                "trace":       traceback.format_exc().splitlines()[-10:],
+                "finished_at": datetime.utcnow().isoformat(),
+            }},
+        )
+
+
+try:
+    run_oneshot_backfill(since="2025-05-09", marker_id="oneshot_backfill_2025_05_09")
+except Exception as e:
+    print(f"[Backfill] unexpected outer failure: {e}")
+
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
