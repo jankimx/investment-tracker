@@ -1792,6 +1792,94 @@ def insights_dashboard():
     })
 
 
+@app.route("/maintenance/backfill", methods=["POST"])
+@require_auth
+def maintenance_backfill():
+    """One-shot backfill: for every held position, move its earliest BUY
+    transaction back to `since` (preserving original date in `backfilled_from`),
+    and pull historical EOD prices back to `since` for every held symbol +
+    the benchmark tickers (SPY/QQQ/VTI).
+
+    Body: { "since": "YYYY-MM-DD" }   (also accepts ?since= query param)
+
+    Idempotent: transactions already dated at or before `since` are skipped,
+    and `backfill_prices_from_fmp` uses $setOnInsert so existing price rows
+    are not overwritten.
+    """
+    payload = request.get_json(silent=True) or {}
+    since   = request.args.get("since") or payload.get("since")
+    if not since:
+        return jsonify({"error": "missing 'since' (YYYY-MM-DD)"}), 400
+    try:
+        datetime.strptime(since, "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": "'since' must be YYYY-MM-DD"}), 400
+
+    # 1. Walk every distinct (platform, stock) with transactions; for each,
+    #    move the earliest BUY transaction's date back to `since` if needed.
+    keys = set()
+    for r in txns.aggregate([
+        {"$group": {"_id": {"platform": "$platform", "stock": "$stock"}}}
+    ]):
+        platform = r["_id"].get("platform")
+        stock    = (r["_id"].get("stock") or "").upper()
+        if platform and stock:
+            keys.add((platform, stock))
+
+    txn_updated = []
+    txn_skipped = []
+    for (platform, stock) in sorted(keys):
+        earliest = txns.find_one(
+            {"platform": platform, "stock": stock, "shares": {"$gt": 0}},
+            sort=[("date", ASCENDING)],
+        )
+        if not earliest:
+            txn_skipped.append({"platform": platform, "stock": stock, "reason": "no buy transactions"})
+            continue
+        current = earliest.get("date", "")
+        if current and current <= since:
+            txn_skipped.append({
+                "platform": platform, "stock": stock,
+                "reason":   f"earliest buy already dated {current} (<= {since})",
+            })
+            continue
+        txns.update_one(
+            {"_id": earliest["_id"]},
+            {"$set": {
+                "date":            since,
+                "backfilled_from": current,
+                "backfilled_at":   datetime.utcnow().isoformat(),
+            }},
+        )
+        txn_updated.append({
+            "platform":  platform,
+            "stock":     stock,
+            "from_date": current,
+            "to_date":   since,
+            "txn_id":    str(earliest["_id"]),
+        })
+
+    # 2. Backfill historical prices for every held symbol + benchmarks.
+    symbols = sorted(
+        {stock for (_, stock) in keys if stock and stock != "TOTAL"}
+        | set(BENCHMARK_SYMBOLS)
+    )
+    price_results = {}
+    for sym in symbols:
+        try:
+            inserted = backfill_prices_from_fmp(sym, since)
+            price_results[sym] = {"inserted": inserted}
+        except Exception as e:
+            price_results[sym] = {"error": f"{type(e).__name__}: {e}"}
+
+    return jsonify({
+        "since":                since,
+        "transactions_updated": txn_updated,
+        "transactions_skipped": txn_skipped,
+        "prices_backfilled":    price_results,
+    })
+
+
 @app.route("/insights/debug/news/<symbol>", methods=["GET"])
 @require_auth
 def insights_debug_news(symbol):
