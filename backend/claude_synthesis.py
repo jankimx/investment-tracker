@@ -193,3 +193,46 @@ END_LEARNING"""
             "learning": "",
             "portfolio_fit": None
         }
+
+
+# -- Dashboard insights ------------------------------------------------
+# Short, action-framed prose for the dashboard CTA cards. See
+# INSIGHTS_DESIGN.md and backend/insights.py for the broader feature.
+
+INSIGHTS_SYSTEM_PROMPT = """You write one-sentence headlines for a personal portfolio dashboard.
+
+Rules you must follow:
+1. Use ONLY the numbers provided in the prompt. Never invent or estimate a figure.
+2. Output ONE sentence, action-framed (suggests reviewing or rethinking something).
+3. Be direct. No hedge words like "consider", "might", "should probably".
+4. Reference at least one specific number from the inputs.
+5. No markdown, no quotes, no preamble. Output the sentence only."""
+
+
+def summarize_concentration(stats, max_words=25):
+    """Generate the action-framed sentence shown in the concentration card.
+    `stats` is the dict returned by insights.compute_concentration().
+    Returns the prose string; raises on Claude API failure (caller catches)."""
+    c  = stats["concentration"]
+    sw = stats["stock_weights"][:5]
+    holdings_lines = "\n".join(f"- {s['symbol']}: {s['weight_pct']}%" for s in sw)
+    plat_lines     = "\n".join(
+        f"- {p['platform']}: {p['weight_pct']}%" for p in stats["platforms"][:4]
+    )
+
+    prompt = f"""Portfolio concentration figures (use ONLY these numbers):
+
+- Top 1 stock weight: {c['top_1_pct']}%
+- Top 3 stocks combined: {c['top_3_pct']}%
+- Top 5 stocks combined: {c['top_5_pct']}%
+- Herfindahl index: {c['hhi']} (0 = diverse, 1 = single position)
+
+Top holdings:
+{holdings_lines}
+
+By platform:
+{plat_lines}
+
+Write one action-framed sentence (max {max_words} words) about what this concentration means and what to think about reviewing. Reference at least one specific number."""
+
+    return claude_complete(prompt, INSIGHTS_SYSTEM_PROMPT, max_tokens=120).strip()

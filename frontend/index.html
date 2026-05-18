@@ -50,6 +50,10 @@
 
     <!-- Dashboard -->
     <div id="tab-dashboard" class="section active">
+      <!-- Insights CTA row — populated by loadInsights(). Hidden when no
+           cards apply or before the first fetch resolves. -->
+      <div id="cta-row" class="cta-row" hidden></div>
+
       <div class="metrics">
         <div class="metric">
           <div class="metric-label">Total value</div>
@@ -308,6 +312,16 @@
 
   </div><!-- /app -->
 </div><!-- /main-app -->
+
+<!-- Insight drawer (slides in from the right when a CTA card is clicked) -->
+<div id="drawer-backdrop" class="drawer-backdrop" hidden onclick="closeInsightDrawer()"></div>
+<aside id="insights-drawer" class="drawer" hidden aria-hidden="true" role="dialog" aria-labelledby="drawer-title">
+  <div class="drawer-header">
+    <h2 id="drawer-title">Insight</h2>
+    <button class="drawer-close" onclick="closeInsightDrawer()" aria-label="Close">&times;</button>
+  </div>
+  <div id="drawer-content"></div>
+</aside>
 
 <div class="toast" id="toast"></div>
 

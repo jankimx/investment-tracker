@@ -146,6 +146,7 @@ document.getElementById('login-pw').addEventListener('keydown', e => {
 
 async function logout() {
   stopAutoPoll();
+  _stopInsightsPolling();
   try { await api('/auth/logout', { method: 'POST' }); } catch { /* best effort */ }
   sessionStorage.removeItem('token');
   location.reload();
@@ -155,6 +156,7 @@ function showApp() {
   document.getElementById('login-screen').style.display = 'none';
   document.getElementById('main-app').style.display     = 'block';
   loadAll();
+  loadInsights();
   startAutoPoll();
 }
 
@@ -1706,4 +1708,273 @@ async function refreshAnalysis(symbol) {
       area.appendChild(el('div', e.message || 'Refresh failed', 'text-align:center;padding:32px;color:var(--red)'));
     }
   }
+}
+
+// -- Insights (CTA row + drawer) ---------------------------
+// Hits /insights/dashboard once on app load. If the server is still
+// generating today's doc, polls with exponential backoff (1, 2, 4, 8, 16,
+// 32s, capped at 60s) until ready. Cards are rendered above the hero
+// metrics; clicking the CTA opens a right-side drawer with details.
+const INSIGHTS_BACKOFF_START_MS = 1000;
+const INSIGHTS_BACKOFF_CAP_MS   = 60000;
+
+let _insightsPollTimer = null;
+let _insightsBackoffMs = INSIGHTS_BACKOFF_START_MS;
+
+async function loadInsights() {
+  try {
+    const data = await api('/insights/dashboard');
+    if (data.status === 'ready') {
+      _stopInsightsPolling();
+      _insightsBackoffMs = INSIGHTS_BACKOFF_START_MS;
+      renderCtaRow(data.cards || []);
+    } else if (data.status === 'generating') {
+      renderCtaLoading();
+      _scheduleInsightsPoll();
+    }
+  } catch (e) {
+    console.error('Failed to load insights:', e);
+    _stopInsightsPolling();
+    const row = document.getElementById('cta-row');
+    if (row) row.hidden = true;
+  }
+}
+
+function _scheduleInsightsPoll() {
+  _stopInsightsPolling();
+  const delay = _insightsBackoffMs;
+  _insightsPollTimer = setTimeout(() => {
+    _insightsBackoffMs = Math.min(_insightsBackoffMs * 2, INSIGHTS_BACKOFF_CAP_MS);
+    loadInsights();
+  }, delay);
+}
+
+function _stopInsightsPolling() {
+  if (_insightsPollTimer) {
+    clearTimeout(_insightsPollTimer);
+    _insightsPollTimer = null;
+  }
+}
+
+const SEVERITY_ORDER = { critical: 0, warn: 1, info: 2 };
+
+function renderCtaRow(cards) {
+  const row = document.getElementById('cta-row');
+  if (!row) return;
+  row.replaceChildren();
+  if (!cards.length) {
+    row.hidden = true;
+    return;
+  }
+  [...cards]
+    .sort((a, b) => (SEVERITY_ORDER[a.severity] ?? 99) - (SEVERITY_ORDER[b.severity] ?? 99))
+    .forEach(c => row.appendChild(buildCtaCard(c)));
+  row.hidden = false;
+}
+
+function buildCtaCard(card) {
+  const wrap = document.createElement('div');
+  wrap.className = 'cta-card cta-' + (card.severity || 'info');
+
+  const headline = document.createElement('div');
+  headline.className = 'cta-card-headline';
+  headline.textContent = card.headline || '';
+  wrap.appendChild(headline);
+
+  if (card.prose) {
+    const prose = document.createElement('div');
+    prose.className = 'cta-card-prose';
+    prose.textContent = card.prose;
+    wrap.appendChild(prose);
+  }
+
+  if (card.cta_label) {
+    const btn = document.createElement('button');
+    btn.className = 'cta-card-btn';
+    btn.textContent = card.cta_label;
+    btn.addEventListener('click', () => openInsightDrawer(card));
+    wrap.appendChild(btn);
+  }
+  return wrap;
+}
+
+function renderCtaLoading() {
+  const row = document.getElementById('cta-row');
+  if (!row) return;
+  row.replaceChildren();
+  const strip = document.createElement('div');
+  strip.className = 'cta-loading';
+  strip.textContent = 'Generating today’s insights — usually ready in 10-15 seconds.';
+  row.appendChild(strip);
+  row.hidden = false;
+}
+
+// -- Drawer ------------------------------------------------
+let _drawerHideTimer = null;
+
+function openInsightDrawer(card) {
+  const drawer   = document.getElementById('insights-drawer');
+  const backdrop = document.getElementById('drawer-backdrop');
+  const content  = document.getElementById('drawer-content');
+  const title    = document.getElementById('drawer-title');
+  if (!drawer || !content) return;
+
+  // Cancel any pending close from a previous drawer interaction --
+  // otherwise its setTimeout would hide the drawer we're about to show.
+  if (_drawerHideTimer) { clearTimeout(_drawerHideTimer); _drawerHideTimer = null; }
+
+  title.textContent = card.headline || 'Insight';
+  content.replaceChildren();
+
+  if (card.prose) {
+    const prose = document.createElement('div');
+    prose.className = 'drawer-prose';
+    prose.textContent = card.prose;
+    content.appendChild(prose);
+  }
+
+  if (card.id === 'concentration') {
+    renderConcentrationDetail(content, card.detail || {});
+  } else {
+    const placeholder = document.createElement('div');
+    placeholder.className = 'drawer-prose';
+    placeholder.textContent = 'Detail view coming soon.';
+    content.appendChild(placeholder);
+  }
+
+  drawer.hidden = false;
+  backdrop.hidden = false;
+  // requestAnimationFrame ensures the browser applies `hidden -> shown`
+  // first, so the CSS transition has a starting state to animate from.
+  requestAnimationFrame(() => {
+    drawer.classList.add('drawer-open');
+    backdrop.classList.add('drawer-open');
+  });
+  drawer.setAttribute('aria-hidden', 'false');
+  document.addEventListener('keydown', _drawerEsc);
+}
+
+function closeInsightDrawer() {
+  const drawer   = document.getElementById('insights-drawer');
+  const backdrop = document.getElementById('drawer-backdrop');
+  if (!drawer) return;
+  drawer.classList.remove('drawer-open');
+  backdrop.classList.remove('drawer-open');
+  drawer.setAttribute('aria-hidden', 'true');
+  document.removeEventListener('keydown', _drawerEsc);
+  // Wait for the slide-out transition before hiding from layout. Stash the
+  // timer so a reopen can cancel it (otherwise it would hide the new drawer).
+  if (_drawerHideTimer) clearTimeout(_drawerHideTimer);
+  _drawerHideTimer = setTimeout(() => {
+    drawer.hidden = true;
+    backdrop.hidden = true;
+    _drawerHideTimer = null;
+  }, 250);
+}
+
+function _drawerEsc(e) {
+  if (e.key === 'Escape') closeInsightDrawer();
+}
+
+function renderConcentrationDetail(parent, detail) {
+  const c   = detail.concentration || {};
+  const tot = detail.total_value;
+
+  // Summary stats grid
+  const summary = document.createElement('div');
+  summary.className = 'concentration-summary';
+  const statRows = [
+    ['Top 1 stock',    (c.top_1_pct ?? 0).toFixed(1) + '%'],
+    ['Top 3 combined', (c.top_3_pct ?? 0).toFixed(1) + '%'],
+    ['Top 5 combined', (c.top_5_pct ?? 0).toFixed(1) + '%'],
+    ['HHI',            (c.hhi ?? 0).toFixed(2)],
+  ];
+  statRows.forEach(([label, val]) => {
+    const row = document.createElement('div');
+    row.className = 'stat-row';
+    const lbl = document.createElement('span');
+    lbl.className = 'stat-label';
+    lbl.textContent = label;
+    const v = document.createElement('span');
+    v.className = 'stat-value';
+    v.textContent = val;
+    row.appendChild(lbl); row.appendChild(v);
+    summary.appendChild(row);
+  });
+  parent.appendChild(summary);
+
+  // By stock
+  const stocks = detail.stock_weights || [];
+  if (stocks.length) {
+    parent.appendChild(_drawerSection('By stock',
+      stocks.map(s => buildWeightRow(s.symbol, s.weight_pct, s.value))));
+  }
+
+  // By platform
+  const plats = detail.platforms || [];
+  if (plats.length) {
+    parent.appendChild(_drawerSection('By platform',
+      plats.map(p => buildWeightRow(p.platform, p.weight_pct, p.value))));
+  }
+
+  // Provenance footer
+  const prov = document.createElement('div');
+  prov.className = 'drawer-provenance';
+  const positionCount = (detail.top_holdings || []).length;
+  prov.appendChild(document.createTextNode(
+    `Computed from ${positionCount} position${positionCount === 1 ? '' : 's'}` +
+    (tot ? `, total value ${fmtDec(tot)}.` : '.')
+  ));
+  const link = document.createElement('a');
+  link.href = '#';
+  link.textContent = 'Open Holdings';
+  link.addEventListener('click', (e) => {
+    e.preventDefault();
+    closeInsightDrawer();
+    switchTab('holdings');
+  });
+  prov.appendChild(link);
+  parent.appendChild(prov);
+}
+
+function _drawerSection(titleText, childNodes) {
+  const section = document.createElement('div');
+  section.className = 'drawer-subsection';
+  const title = document.createElement('div');
+  title.className = 'drawer-subsection-title';
+  title.textContent = titleText;
+  section.appendChild(title);
+  childNodes.forEach(n => section.appendChild(n));
+  return section;
+}
+
+function buildWeightRow(label, pct, value) {
+  const row = document.createElement('div');
+  row.className = 'weight-row';
+
+  const top = document.createElement('div');
+  top.className = 'weight-row-top';
+  const lbl = document.createElement('span');
+  lbl.className = 'weight-row-label';
+  lbl.textContent = label;
+  const pctEl = document.createElement('span');
+  pctEl.className = 'weight-row-pct';
+  pctEl.textContent = (pct ?? 0).toFixed(1) + '%';
+  top.appendChild(lbl); top.appendChild(pctEl);
+
+  const track = document.createElement('div');
+  track.className = 'weight-bar-track';
+  const fill = document.createElement('div');
+  fill.className = 'weight-bar-fill';
+  fill.style.width = Math.max(0, Math.min(100, pct ?? 0)) + '%';
+  track.appendChild(fill);
+
+  const sub = document.createElement('div');
+  sub.className = 'weight-row-value';
+  sub.textContent = value != null ? fmtDec(value) : '';
+
+  row.appendChild(top);
+  row.appendChild(track);
+  row.appendChild(sub);
+  return row;
 }

@@ -44,6 +44,7 @@ balances = db["balances"]     # NEW: source of truth for snapshot-tracked positi
 meta     = db["meta"]
 analyses = db["analyses"]
 sessions = db["sessions"]
+insights = db["insights"]    # NEW: one document per day, drives the dashboard CTA row
 
 # Create indexes once at startup
 try:
@@ -54,6 +55,9 @@ try:
     sessions.create_index([("token", ASCENDING)], unique=True)
     # TTL index — Mongo deletes session docs once expires_at is in the past
     sessions.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
+    # TTL on meta.expires_at — used for insights generation locks (and any
+    # future short-lived meta token). Docs without `expires_at` are unaffected.
+    meta.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0)
 except Exception as e:
     print(f"[Startup] Index warning: {e}")
 
@@ -491,6 +495,14 @@ scheduler.add_job(
     _scheduled_refresh,
     CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone=ET_TZ),
     coalesce=True, max_instances=1, id="refresh_close",
+)
+# Daily insights generation — 16:30 ET, after the close-tick refresh has
+# populated today's prices. Decoupled from refresh so a failure in one
+# doesn't block the other. See INSIGHTS_DESIGN.md §5.
+scheduler.add_job(
+    lambda: _scheduled_insights(),
+    CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone=ET_TZ),
+    coalesce=True, max_instances=1, id="insights_daily",
 )
 scheduler.start()
 
@@ -1403,6 +1415,156 @@ def refresh_status():
         "errors":          m.get("errors", []),
         "in_progress":     in_progress,
     })
+
+# -- Insights ----------------------------------------------
+# Dashboard CTA card row. See INSIGHTS_DESIGN.md.
+#
+# Cron generates the daily doc at 16:30 ET. Reads lazily regenerate if the
+# doc is missing (weekends, outages, fresh deploy). Concurrent generation is
+# de-duped by a TTL-protected lock document in `meta`.
+
+_insights_lock = threading.Lock()  # in-process guard against double-spawning
+
+def _today_str():
+    return datetime.utcnow().strftime("%Y-%m-%d")
+
+
+def _claim_insights_lock(today):
+    """Atomically claim the cross-worker lock for today's generation.
+    Returns (claimed, started_at) where started_at is the lock's timestamp
+    (whether we claimed it or someone else holds it)."""
+    now = datetime.utcnow()
+    try:
+        meta.insert_one({
+            "_id":        f"insights_lock_{today}",
+            "started_at": now,
+            "expires_at": now + timedelta(seconds=120),
+            "pid":        os.getpid(),
+        })
+        return True, now
+    except DuplicateKeyError:
+        existing = meta.find_one({"_id": f"insights_lock_{today}"})
+        return False, (existing.get("started_at") if existing else now)
+
+
+def _release_insights_lock(today):
+    meta.delete_one({"_id": f"insights_lock_{today}"})
+
+
+def _generate_and_persist_insights(today, trigger):
+    """Compute today's insights and upsert into the `insights` collection.
+    Holds the in-process lock so a single worker can't spawn two generations.
+    Always releases the Mongo lock (and the local lock) on exit."""
+    if not _insights_lock.acquire(blocking=False):
+        # Another thread in this process is already generating. Don't drop
+        # the Mongo lock -- the running thread owns it.
+        print(f"[Insights] In-process generation already running, skipping")
+        return
+    try:
+        from insights import generate_insights
+        from claude_synthesis import summarize_concentration
+
+        def prose_fn(card_id, stats):
+            if card_id == "concentration":
+                return summarize_concentration(stats)
+            return None
+
+        positions = derive_all_positions()
+        doc = generate_insights(
+            positions,
+            prose_fn=(prose_fn if CLAUDE_KEY else None),
+            trigger=trigger,
+        )
+        insights.replace_one({"_id": today}, {"_id": today, **doc}, upsert=True)
+        print(
+            f"[Insights] {trigger} generation complete for {today}: "
+            f"{len(doc['cards'])} cards, "
+            f"{doc['generation']['claude_calls']} claude calls, "
+            f"{doc['generation']['duration_ms']}ms"
+        )
+    except Exception as e:
+        import traceback
+        print(f"[Insights] Generation failed: {type(e).__name__}: {e}\n{traceback.format_exc()}")
+    finally:
+        _release_insights_lock(today)
+        _insights_lock.release()
+
+
+def _serialize_insights(doc):
+    """Strip Mongo internals and filter to renderable cards."""
+    cards = [c for c in doc.get("cards", []) if c.get("show")]
+    return {
+        "status":     "ready",
+        "as_of":      doc.get("generated_at"),
+        "generation": doc.get("generation"),
+        "cards":      cards,
+    }
+
+
+def _generating_response(started_at):
+    """Standard payload returned while generation is in flight."""
+    if isinstance(started_at, datetime):
+        started_at = started_at.replace(microsecond=0).isoformat() + "Z"
+    return {"status": "generating", "started_at": started_at, "cards": []}
+
+
+def _scheduled_insights():
+    """Daily cron — fires at 16:30 ET Mon-Fri. Uses the same lock as the
+    lazy path so manual + cron + multi-worker can't double-generate."""
+    today = _today_str()
+    if insights.find_one({"_id": today}, {"_id": 1}):
+        return  # already generated today (manual or earlier worker)
+    claimed, _ = _claim_insights_lock(today)
+    if not claimed:
+        return  # another worker beat us to it
+    print(f"[Insights] pid={os.getpid()} starting cron generation for {today}")
+    threading.Thread(
+        target=_generate_and_persist_insights,
+        args=(today, "cron"),
+        daemon=True,
+    ).start()
+
+
+@app.route("/insights/dashboard", methods=["GET"])
+@require_auth
+def insights_dashboard():
+    today = _today_str()
+    doc = insights.find_one({"_id": today})
+    if doc:
+        return jsonify(_serialize_insights(doc))
+
+    claimed, started_at = _claim_insights_lock(today)
+    if claimed:
+        threading.Thread(
+            target=_generate_and_persist_insights,
+            args=(today, "lazy"),
+            daemon=True,
+        ).start()
+    return jsonify(_generating_response(started_at))
+
+
+@app.route("/insights/refresh", methods=["POST"])
+@require_auth
+def insights_refresh():
+    """Force regenerate today's insights. Returns 202 immediately."""
+    today = _today_str()
+    if _insights_lock.locked():
+        return jsonify({
+            "status": "generating",
+            "error":  "Generation already in progress",
+        }), 409
+    insights.delete_one({"_id": today})
+    _release_insights_lock(today)  # clear any stale lock too
+
+    claimed, started_at = _claim_insights_lock(today)
+    if claimed:
+        threading.Thread(
+            target=_generate_and_persist_insights,
+            args=(today, "manual"),
+            daemon=True,
+        ).start()
+    return jsonify(_generating_response(started_at)), 202
+
 
 # -- Stock Analyzer ---------------------------------------
 @app.route("/analyze/<symbol>", methods=["GET"])
